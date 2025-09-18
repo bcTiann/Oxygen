@@ -338,8 +338,8 @@ if __name__=="__main__":
     plt.clf()
     nu = dnu*np.arange(1000) + dnu/2
     natoms = f_eos['ns [cm^-3]'].data.shape[2]//3
-    kappa_bar_Planck = np.zeros_like(f[0].data)
-    kappa_bar_Ross = np.zeros_like(f[0].data)
+    kappa_bar_Planck = np.zeros_like(f_eos[0].data)
+    kappa_bar_Ross = np.zeros_like(f_eos[0].data)
     for i, P_log10 in enumerate(Ps_log10):
         for j, T in enumerate(Ts):
             nHI = f_eos['ns [cm^-3]'].data[i,j,0]
@@ -371,3 +371,4 @@ if __name__=="__main__":
     plt.legend()
     plt.xlabel('Wavelength [m]')
     plt.ylabel(r'$\kappa_R$ [cm$^2$/g]')
+    plt.show()

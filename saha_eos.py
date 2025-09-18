@@ -28,7 +28,7 @@ def solarmet():
     elt_names = np.array(['H', 'He',   'C',   'N',   'O',   'Ne',  'Na',   'Mg',   'Al',  'Si',  'S',   'Cl', 'K',   'Ca', 'Ti', 'Cr', 'Mn', 'Fe', 'Co', 'Ni'])
     n_p =        np.array([1,   2,      6,     7,     8,     10,    11,     12,      13,    14,   16,     17,  19,     20,   22,   24,   24,   26,   27,  28 ])
     masses=      np.array([1.0, 4.0,    12.01, 14.01, 16.00, 18.0,  22.99, 24.31, 26.98, 28.09, 32.06, 35.45, 39.10,40.08, 47.87, 52.0, 54.94, 55.85, 58.93,63.55])
-    abund = 10**(np.array([12, 10.93,   8.43,  7.83,  8.69,  7.93,  6.24,  7.60,   6.43,  7.51,  7.12,  5.31,  5.03, 6.30,  4.97, 5.62, 5.42, 7.46, 4.94, 6.20])-12)
+    abund = 10**(np.array([12, 10.93,   8.43,  7.83,  8.66,  7.93,  6.24,  7.60,   6.43,  7.51,  7.12,  5.31,  5.03, 6.30,  4.97, 5.62, 5.42, 7.46, 4.94, 6.20])-12)
     ionI  =      np.array([13.595,24.58,11.26, 14.53, 13.61, 21.56, 5.14,  7.644,  5.98,  8.149,10.36, 13.01, 4.339,6.111, 6.80, 6.74, 6.76, 7.87, 7.88 ,7.63])
     ionII  =     np.array([-0.754,  54.403,  24.376,29.593,35.108,40.96, 47.29, 15.03, 18.82,  16.34, 23.40,23.80, 31.81,11.87, 13.57, 16.49, 15.64,16.18, 17.08, 18.15])
 
@@ -45,6 +45,8 @@ def solarmet():
 
     return abund, masses, n_p, ionI, ionII, gI, gII, gIII, elt_names
         
+        
+
 def saha(n_e, T):
     """Compute the solution to the Saha equation as a function of electron number
     density and temperature, in CGS units. 
@@ -323,6 +325,80 @@ def P_T_tables(Ps, Ts, savefile=''):
             hdulist.writeto(savefile, overwrite=True)
     return rho_tab, Ui_tab, mu_tab, ns_tab
  
+
+ 
+
+def calculate_excitation_fraction(T, g_i, chi_i, Z_T):
+    """
+    Calculates the fraction of atoms in a specific excitation state 'i'
+    using the Boltzmann Equation.
+
+    Parameters
+    ----------
+    T : astropy.units.Quantity
+        Temperature in Kelvin.
+    g_i : float
+        Statistical weight of the level 'i'.
+    chi_i : float
+        Excitation energy of the level 'i' in cm^-1.
+    Z_T : float
+        The partition function at temperature T.
+
+    Returns
+    -------
+    fraction : float
+        The fraction of atoms in state 'i' (n_i / N_total).
+    """
+    # Convert excitation energy from cm^-1 to Joules
+    chi_i_J = chi_i * u.cm**-1 * c.h * c.c
+    
+    # Calculate kT in Joules
+    kT_J = c.k_B * T
+    
+    # Boltzmann Equation: (g_i / Z) * exp(-chi_i / kT)
+    fraction = (g_i / Z_T) * np.exp(-chi_i_J / kT_J)
+    
+    return fraction
+
+
+
+def get_Z_O_I(T_kelvin):
+    """
+    Calculates the partition function for neutral Oxygen (O I) using the
+    polynomial fit from Sauval & Tatum (1984).
+    This is a more accurate method than using a constant.
+
+    Parameters
+    ----------
+    T_kelvin : float or numpy.array
+        Temperature in Kelvin.
+
+    Returns
+    -------
+    Z : float or numpy.array
+        The partition function Z(T).
+    """
+    # Ensure the function works with both single values and arrays of temperatures
+    T = np.asarray(T_kelvin)
+    
+    # This polynomial fit is most accurate for temperatures between 1000 K and 11000 K
+    theta = 5040.0 / T
+    log_theta = np.log10(theta)
+    
+    # Coefficients for Neutral Oxygen (O I) from Sauval & Tatum (1984)
+    A = 0.961
+    B = 0.008
+    C = -0.063
+    D = 0.024
+    E = -0.004
+    
+    # The polynomial is for log10(Z)
+    log10_Z = A + B*log_theta + C*log_theta**2 + D*log_theta**3 + E*log_theta**4
+    
+    return 10**log10_Z
+
+
+
 if __name__=='__main__':
 	#Saha Test - number density of electrons, and temperature!
     rho, mu, Ui, ns = saha(1e18, 50000)
