@@ -22,7 +22,7 @@ from scipy.special import expn
 import saha_eos as eos
 from strontium_barium import *
 from scipy.interpolate import interp1d
-plt.ion()
+from scipy.special import voigt_profile
 
 
 Teff = 5777 # K #4850 is the lowest. 9000 is the highest that makes sense.
@@ -100,10 +100,20 @@ pressure_pa_table = np.array([
     1.67E+04, 1.76E+04, 1.86E+04, 1.97E+04, 2.09E+04, 2.25E+04
 ])
 
+pe_pa_table = np.array([
+    2.09E-03, 2.73E-03, 3.58E-03, 4.69E-03, 6.11E-03, 7.94E-03, 1.03E-02, 1.32E-02, 1.69E-02, 2.16E-02,
+    2.74E-02, 3.48E-02, 4.41E-02, 5.59E-02, 7.12E-02, 9.12E-02, 1.17E-01, 1.53E-01, 2.00E-01, 2.67E-01,
+    3.61E-01, 5.02E-01, 7.44E-01, 1.27E+00, 2.64E+00, 6.71E+00, 1.98E+01, 5.69E+01, 1.33E+02, 2.52E+02,
+    4.08E+02, 5.90E+02, 7.82E+02, 9.84E+02, 1.21E+03, 1.46E+03
+])
+# Convert electron pressure to cgs units (dyn/cm^2)
+pe_cgs_table = pe_pa_table * 10.0
 # Pa convert to dyn/cm^2
 pressure_cgs_table = pressure_pa_table * 10.0
 
 # use above values, create interplation function
+
+f_pe_from_tau = interp1d(log_tau_table, pe_cgs_table, kind='cubic')
 f_temp_from_tau = interp1d(log_tau_table, temp_table, kind='cubic')
 f_pressure_from_tau = interp1d(log_tau_table, pressure_cgs_table, kind='cubic')
 #######################################################################################################
@@ -142,7 +152,7 @@ kappa_bars = f_kappa_bar_Ross((np.log10(Ps), Ts))
 rhos = f_rho((np.log10(Ps), Ts))    
 
 # First, lets plot a continuum spectrum
-wave = np.linspace(777.0, 777.8, 400) * u.nm  # Wavelength in nm
+wave = np.linspace(775.0, 780.0, 10000) * u.nm  # Wavelength in nm
 flux = np.zeros_like(wave)  # Initialize flux array
 
 # Just like in grey_flux.py, but in frequency 
@@ -250,6 +260,7 @@ table_W_lambda_list_pm = [7.12, 6.18, 4.88] # each coresponds to emission line i
 
 
 
+
 # --- calculate for each emission line  ---
 for line_index in range(len(oxygen_lambdas_nm)):
 
@@ -263,9 +274,22 @@ for line_index in range(len(oxygen_lambdas_nm)):
 
     # interate over each layer of atmosphere
     for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
+        # Get the log_tau value for the current layer
+        current_log_tau = log_tau_grid[valid_indices][i]
+        # Use the new interpolator to get electron pressure from the table
+        Pe_cgs = f_pe_from_tau(current_log_tau) # Electron pressure in dyn/cm^2
+
+        # Convert electron pressure (Pe) to electron number density (n_e)
+        # using the ideal gas law for electrons: Pe = n_e * k_B * T
+        n_e = Pe_cgs / (c.k_B.cgs.value * T) # n_e in cm^-3
+
+        # Now that we have n_e and T, call the core saha function directly
+        # This is much faster than the solver ns_from_rho_T
+        rho_check, mu, Ui, ns = eos.saha(n_e, T)
+
         current_T = T * u.K
         current_rho = rho * u.g / u.cm**3
-        n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
+        # n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
         O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
         n_O_I = ns[3 * O_ix]
         current_Z_T = eos.get_Z_O_I(T)
@@ -275,11 +299,29 @@ for line_index in range(len(oxygen_lambdas_nm)):
         n_absorbers = (n_O_I * frac_excited).value
 
 
-        line_nu_center = (c.c / current_line_lambda).to(u.Hz).value
-        doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
-        line_profile = (1.0 / (doppler_width_nu.value * np.sqrt(np.pi))) * \
-                       np.exp(-(nu - line_nu_center)**2 / doppler_width_nu.value**2)
 
+        print(f"line_index: {line_index}: n_absorbers: {n_absorbers}")
+
+        line_nu_center = (c.c / current_line_lambda).to(u.Hz).value
+        # doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
+        # line_profile = (1.0 / (doppler_width_nu.value * np.sqrt(np.pi))) * \
+        #                np.exp(-(nu - line_nu_center)**2 / doppler_width_nu.value**2)
+
+        # 1. 计算多普勒宽度 (和以前一样)
+        doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
+
+        # 2. 【新增】计算 Voigt Profile 所需的两个参数
+        sigma_gauss = doppler_width_nu.value / np.sqrt(2)
+        # 为洛伦兹增宽估算一个合理的阻尼常数 gamma (单位: Hz)
+        # 这是一个近似值，但能很好地体现出碰撞增宽的效应
+        gamma_lorentz = 3e8 # 这是一个合理的数量级估算
+
+        # 3. 【修改】使用 voigt_profile 函数计算谱线轮廓
+        # 注意：voigt_profile 函数本身已经归一化，所以我们不需要再乘以归一化因子
+        # 函数的第一个参数是频率点到中心频率的距离
+        line_profile = voigt_profile(nu - line_nu_center, sigma_gauss, gamma_lorentz)
+
+        
         gf_value = 10**oxygen_log_gfs[line_index]
         kappa_line = (f_const * gf_value / rho) * n_absorbers * line_profile
 
@@ -290,9 +332,38 @@ for line_index in range(len(oxygen_lambdas_nm)):
     #  spectrum for a single line
     H_single_line = compute_H(wave, Ts, tau_grid, kappa_total_nu, kappa_bars)
 
+    plt.figure(figsize=(15, 7))
+    plt.plot(wave.to_value(u.nm), H_single_line, label='Synthetic Spectrum', lw=1)
+    plt.xlabel('Wavelength (nm)')
+    plt.ylabel('Flux')
+    plt.title('Visually Inspecting the Continuum for Normalization')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    plt.savefig(f"{line_index} get_continum_spectrum")
+    plt.show()
+
+    wave_nm = wave.to_value(u.nm)
+    indices_1 = np.where((wave_nm >= 775.0) & (wave_nm <= 776.5))
+    indices_2 = np.where((wave_nm >= 778.5) & (wave_nm <= 780.0))
+    continuum_indices = np.concatenate((indices_1[0], indices_2[0]))
+
+    # 从完整光谱中提取出这些锚点的波长和流量值
+    continuum_wavelengths = wave_nm[continuum_indices]
+    continuum_fluxes = H_single_line[continuum_indices]
+
+    # 用一次多项式（直线）来拟合这些锚点 (如果连续谱是弯的，第二个参数可以改成2)
+    p = np.polyfit(continuum_wavelengths, continuum_fluxes, 1)
+    continuum_fit_function = np.poly1d(p)
+
+    # 使用拟合函数计算出每一个波长点上的连续谱理论值
+    continuum_level_fit = continuum_fit_function(wave_nm)
+
+    # 用这个精确的连续谱来归一化整个光谱
+    model_flux_normalized_single = H_single_line / continuum_level_fit
+
     # --- equivelent width for a single line  ---
-    continuum_level_single = H_single_line[0]
-    model_flux_normalized_single = H_single_line / continuum_level_single
+    # continuum_level_single = H_single_line[0]
+    # model_flux_normalized_single = H_single_line / continuum_level_single
 
     d_wave_nm = wave[1].to_value(u.nm) - wave[0].to_value(u.nm)
     model_W_lambda_nm = np.sum(1.0 - model_flux_normalized_single) * d_wave_nm
@@ -302,18 +373,28 @@ for line_index in range(len(oxygen_lambdas_nm)):
     model_W_lambda_list_pm.append(model_W_lambda_pm)
 
 
+
+
 # --- For plotting spectrum simulation ，recalculate kappa_line_total for all three lines ---
 print("\nRecalculating combined spectrum for plotting...")
 kappa_total_nu = np.empty((len(wave), len(tau_grid)))
+
+
+n_absorbers_list = []
+
+
 for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
     current_T = T * u.K
     current_rho = rho * u.g / u.cm**3
-    n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
+    # n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
     O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
     n_O_I = ns[3 * O_ix]
     current_Z_T = eos.get_Z_O_I(T)
     frac_excited = eos.calculate_excitation_fraction(current_T, oxygen_g_i, oxygen_chi_i, current_Z_T)
     n_absorbers = (n_O_I * frac_excited).value
+
+    n_absorbers_list.append(n_absorbers)
+
     kappa_line_total = np.zeros_like(nu)
     for j in range(len(oxygen_lambdas_nm)): 
         line_lambda = oxygen_lambdas_nm[j]
@@ -345,6 +426,16 @@ for i in range(len(oxygen_lambdas_nm)):
     else:
         print("  --> Model matches observation well.")
 
+plt.figure(figsize=(8, 6))
+# 使用 semilogy 来让 Y 轴以对数形式呈现
+plt.semilogy(log_tau_grid[valid_indices], n_absorbers_list)
+plt.xlabel('log($\\tau_{500}$)')
+plt.ylabel('Number of Absorbers ($N_{abs}$ per cm$^3$)')
+plt.title('Calculated Oxygen Absorber Density vs. Depth in Sun')
+plt.grid(True)
+plt.savefig("n_absorbers_plot")
+plt.show()
+
 
 
 # ---- ADD THIS ENTIRE BLOCK BACK IN ----
@@ -354,7 +445,7 @@ kappa_total_nu = np.empty((len(wave), len(tau_grid)))
 for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
     current_T = T * u.K
     current_rho = rho * u.g / u.cm**3
-    n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
+    # n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
     O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
     n_O_I = ns[3 * O_ix]
     current_Z_T = eos.get_Z_O_I(T)
