@@ -9,40 +9,33 @@
 # - Time: s
 # - Temperature: K
 # - Frequency: Hz
-import pandas as pd
 from scipy.interpolate import RegularGridInterpolator
-from scipy.integrate import solve_ivp, cumulative_trapezoid
+from scipy.integrate import cumulative_trapezoid
 import astropy.units as u
-import astropy.constants as c
+import astropy.constants as const
 import numpy as np
 import astropy.io.fits as pyfits
 import matplotlib.pyplot as plt
 import opac
 from scipy.special import expn
 import saha_eos as eos
-from strontium_barium import *
 from scipy.interpolate import interp1d
-from scipy.special import voigt_profile
+from lambda_matrix import lambda_matrix
+import Collision_rate as cr
 
 
-Teff = 5777 # K #4850 is the lowest. 9000 is the highest that makes sense.
-g = 27400  # cm/s^2
-P0 = 10 # Initial pressure in dyn/cm^2
-# --- Atomic Data for the Oxygen I 7774 Angstrom Triplet ---
-# For simplicity, we treat the triplet as a single line with its
-# weighted-average physical parameters.
-oxygen_lambdas_nm = np.array([777.1944, 777.4166, 777.5388]) * u.nm
-oxygen_chi_i = 73768.2  # Excitation energy of the lower level in cm^-1
-oxygen_g_i = 5.0      # Statistical weight (degeneracy) of the lower level
-oxygen_log_gfs = np.array([0.369, 0.223, 0.002])
-# The partition function Z is temperature-dependent. For this project, we can
-# approximate it with a constant value suitable for the solar photosphere.
-# oxygen_Z_T = 9.0
+OI_77719 = {"E_l": 9.1460911*u.eV, "E_u": 10.7409314*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 3, "A_ul": 3.69e7/u.s}
+OI_TRIPLET = [
+    {"E_l": 9.1460911*u.eV, "E_u": 10.7409314*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 3, "A_ul": 3.69e7/u.s},
+    {"E_l": 9.1460911*u.eV, "E_u": 10.7404756*u.eV, "f": 3.35e-1, "J_l": 2, "J_u": 2, "A_ul": 3.69e7/u.s},
+    {"E_l": 9.1460911*u.eV, "E_u": 10.7402250*u.eV, "f": 2.01e-1, "J_l": 2, "J_u": 1, "A_ul": 3.69e7/u.s},
+]
 
+# trial_abundances = np.array([8.00, 8.69, 8.95, 9.55, 10.55])
+trial_abundances = np.array([6.0, 7.39, 8.39, 8.69, 9.1, 9.5, 10.0, 10.55, 11.0, 11.5,  12.0, 13.0])
+# trial_abundances = np.array([8.95])
+results_list = []
 
-# Set to 1.3 to limit T due to the onset of convection.
-# If set to 2.0, there is no effect.
-convective_cutoff = 1.3
 
 # Load the opacity table for Rosseland mean.
 f_opac = pyfits.open('Ross_Planck_opac.fits')
@@ -54,30 +47,40 @@ h = f_opac[0].header
 T_grid = h['CRVAL1'] + np.arange(h['NAXIS1'])*h['CDELT1']
 Ps_log10 = h['CRVAL2'] + np.arange(h['NAXIS2'])*h['CDELT2']
 
-P0 = np.maximum(10**(Ps_log10[0]), P0)  # Ensure P0 is not less than the minimum pressure in the table
 
-#Create our interpolator functions
+# Build an interpolator that retrieves the Rosseland mean opacity for arbitrary (log10 P, T).
 f_kappa_bar_Ross = RegularGridInterpolator((Ps_log10, T_grid), kappa_bar_Ross)
 
-def T_tau(tau, Teff):
-	"""
-	Temperature for a simplified grey atmosphere, with an analytic
-    approximation for the Hopf q (feel free to check this!)
-	"""
-	q = 0.71044 - 0.1*np.exp(-2.0*tau)
-	T = (0.75*Teff**4*(tau + q))**.25
-	return T
 
-def dPdtau(_, P, T):
-	"""
-	Compute the derivative of pressure with respect to optical depth.
-	"""
-	kappa_bar = f_kappa_bar_Ross((np.log10(P), T))
-	return g / kappa_bar
 
-##############################################################################################################
-############################(Solar T, P, rho from M. Asplund 2004 paper) #####################################
-# Data extracted from Table 1 
+def planck_nu(T, wavelength_nm):
+    """Return the Planck function B_nu for temperature array T (K) at wavelength_nm (nm)."""
+    h_val = 6.626e-34  # J*s, Planck constant
+    c_val = 3.0e8      # m/s, speed of light
+    k_B_val = 1.38e-23 # J/K, Boltzmann constant
+
+    # Convert wavelength from nm to frequency in Hz
+    # This handles T being an array and wavelength_nm being a scalar
+    nu = c_val / (wavelength_nm * 1e-9)
+    T_arr = np.asarray(T) # Ensure T is an array
+    exponent = h_val * nu / (k_B_val * T_arr)
+
+    # Create a result array of zeros first.
+    B_nu = np.zeros_like(T_arr, dtype=float)
+
+    # Only calculate for exponents that won't overflow
+    valid_indices = exponent < 700 
+
+    # Perform calculation only on the valid elements
+    B_nu[valid_indices] = (2 * h_val * nu**3 / c_val**2) / (np.exp(exponent[valid_indices]) - 1)
+
+    # If the original T was a single number, return a single number
+    if B_nu.ndim == 0:
+        return B_nu.item()
+    return B_nu
+
+
+# Solar T, P, and density profiles digitised from Asplund et al. (2004) Table 1.
 log_tau_table = np.array([
     -5.00, -4.80, -4.60, -4.40, -4.20, -4.00, -3.80, -3.60, -3.40, -3.20, 
     -3.00, -2.80, -2.60, -2.40, -2.20, -2.00, -1.80, -1.60, -1.40, -1.20, 
@@ -106,18 +109,27 @@ pe_pa_table = np.array([
     3.61E-01, 5.02E-01, 7.44E-01, 1.27E+00, 2.64E+00, 6.71E+00, 1.98E+01, 5.69E+01, 1.33E+02, 2.52E+02,
     4.08E+02, 5.90E+02, 7.82E+02, 9.84E+02, 1.21E+03, 1.46E+03
 ])
+
+
 # Convert electron pressure to cgs units (dyn/cm^2)
 pe_cgs_table = pe_pa_table * 10.0
+
+rho_kg_m3_table = np.array([
+    8.28E-13, 1.09E-12, 1.42E-12, 1.88E-12, 2.47E-12, 3.21E-12, 4.16E-12, 5.36E-12, 6.89E-12, 8.82E-12,
+    1.13E-11, 1.44E-11, 1.82E-11, 2.21E-11, 2.95E-11, 3.75E-11, 4.77E-11, 6.05E-11, 7.65E-11, 9.61E-11,
+    1.20E-10, 1.47E-10, 1.79E-10, 2.13E-10, 2.46E-10, 2.70E-10, 2.82E-10, 2.85E-10, 2.83E-10, 2.81E-10,
+    2.79E-10, 2.79E-10, 2.82E-10, 2.87E-10, 2.96E-10, 3.09E-10
+])
+# 1 kg/m^3 = 1000 g / (100 cm)^3 = 1000 / 1,000,000 g/cm^3 = 0.001 g/cm^3
+rho_cgs_table = rho_kg_m3_table * 0.001
+
 # Pa convert to dyn/cm^2
 pressure_cgs_table = pressure_pa_table * 10.0
 
-# use above values, create interplation function
-
-f_pe_from_tau = interp1d(log_tau_table, pe_cgs_table, kind='cubic')
+# Create interpolation functions that map log10 optical depth to the tabulated quantities.
 f_temp_from_tau = interp1d(log_tau_table, temp_table, kind='cubic')
 f_pressure_from_tau = interp1d(log_tau_table, pressure_cgs_table, kind='cubic')
-#######################################################################################################
-#######################################################################################################
+f_rho_from_tau = interp1d(log_tau_table, rho_cgs_table, kind='cubic')
 
 tau_grid = np.concatenate((np.arange(3)/3*1e-3,np.logspace(-3,1.3,30)))
 tau_grid = tau_grid[tau_grid > 0]
@@ -128,36 +140,34 @@ Ts = f_temp_from_tau(log_tau_grid[valid_indices])
 Ps = f_pressure_from_tau(log_tau_grid[valid_indices])
 
 
-# ##################################### Mike's code #####################################
-# # Starting from the lowest value of log(P), integrate P using solve_ivp
-# #solve_ivp(fun, t_span, y0, method='RK45', t_eval=None, dense_output=False, events=None, vectorized=False, args=None, **options)
-# tau_grid = np.concatenate((np.arange(3)/3*1e-3,np.logspace(-3,1.3,30)))
-# sol = solve_ivp(dPdtau, [0, 20], [P0], args=(Teff,), t_eval=tau_grid, method='RK45')
-# Ps = sol.y[0]
-# Ts = T_tau(tau_grid, Teff)
-# # Artificially cut the deep layer temperature due to convection.
-# Ts = np.minimum(Ts,convective_cutoff*Teff)
-# ##################################### Mike's code #####################################
 
-
-# Load the equation of state
-f_eos = pyfits.open('rho_Ui_mu_ns_ne.fits')
-rho = f_eos['rho [g/cm**3]'].data
-
-# Add interpolation functions for whatever isn't already in opac - just rho.
-f_rho = RegularGridInterpolator((Ps_log10, T_grid), rho)
 
 # Interpolate onto the tau grid
 kappa_bars = f_kappa_bar_Ross((np.log10(Ps), Ts))
-rhos = f_rho((np.log10(Ps), Ts))    
+
+rhos = f_rho_from_tau(log_tau_grid[valid_indices])
 
 # First, lets plot a continuum spectrum
-wave = np.linspace(775.0, 780.0, 10000) * u.nm  # Wavelength in nm
-flux = np.zeros_like(wave)  # Initialize flux array
+# wave = np.linspace(775.0, 780.0, 10000) * u.nm  # Wavelength in nm
+# flux = np.zeros_like(wave)  # Initialize flux array
+nu0 = const.c.to('cm/s').value / (1000 * 1e-7)  # Start Freq @ 1000 nm
+dlnu = 1e-6  # Logarithmic frequency step, very high resolution
+Nnu = 400000 # Number of frequency points, covers a large range
+
+# Compute the frequency and wavelength arrays based on the grid settings
+nu = nu0 * np.exp(dlnu * np.arange(Nnu)) # in Hz
+wave_nm = (const.c / (nu * u.Hz)).to(u.nm).value
+
+# Create the main array to store the final opacities
+# It has dimensions (Number of Frequencies, Number of Atmospheric Layers)
+kappa_nu_bars = np.empty((Nnu, len(tau_grid)))
+
+print(f"Spectral grid setup complete. Calculating for {Nnu} frequency points.")
+print(f"This will cover a wavelength range from ~{wave_nm.min():.1f} nm to ~{wave_nm.max():.1f} nm.")
 
 # Just like in grey_flux.py, but in frequency 
-planck_C1 = (2*c.h*c.c**2/(1*u.um)**5).si.value
-planck_C2 = (c.h*c.c/(1*u.um)/c.k_B/(1*u.K)).si.value
+planck_C1 = (2*const.h*const.c**2/(1*u.um)**5).si.value
+planck_C2 = (const.h*const.c/(1*u.um)/const.k_B/(1*u.K)).si.value
 
 # Planck function, like in grey_flux.py
 def Blambda_SI(wave_um, T):
@@ -179,348 +189,423 @@ def compute_H(wave, Ts, tau_grid, kappa_nu_bars, kappa_bars):
 			(expn(4,tau_nu[:-1])-expn(4,tau_nu[1:]))))
     return Hlambda
 
-
-# store equivlent width for each line
-model_W_lambda_list_pm = []
-
-# equivlent width from Table 3 (M. Asplund 2004 paper) , will be used to verify our result
-table_W_lambda_list_pm = [7.12, 6.18, 4.88] # each coresponds to emission line in 777.19, 777.41, 777.53 nm 
-
-
-
-# --- Start: New Main Loop for Line Synthesis ---
-
-# print("Computing total opacities (continuum + line)...")
-# # Prepare an empty array for the final opacity table
-# # It has dimensions (number_of_wavelength_points, number_of_atmospheric_layers)
-# kappa_total_nu = np.empty((len(wave), len(tau_grid)))
-# nu = (c.c / wave).to(u.Hz).value # Corresponding frequency grid in Hz
-
-# # A constant needed for the line opacity calculation (from opac.py)
-# f_const = (np.pi * c.e.gauss**2 / c.m_e / c.c).cgs.value
-
-# # Loop through each layer of our solar atmosphere model
-# for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
-#     # --- Part A: Calculate the number of absorbers (same as before) ---
-#     current_T = T * u.K
-#     current_rho = rho * u.g / u.cm**3
-
-#     # given rho and T of a layer, calculate how much  nutral O atoms
-#     n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
-#     O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
-#     n_O_I = ns[3 * O_ix]
-
-#     current_Z_T = eos.get_Z_O_I(T) # T is the layer temp in Kelvin (a plain number)
-
-
-#     # 2. Use this new, more accurate Z value in the Boltzmann equation
-#     # In all nutral O atoms, how much fraction are excited in the specific level where it can absorb 777nm photons
-#     frac_excited = eos.calculate_excitation_fraction(
-#         current_T, oxygen_g_i, oxygen_chi_i, current_Z_T
-#     )
-#     # how many O atoms can absorb 777nm photons
-#     n_absorbers = n_O_I * frac_excited
-#     n_absorbers = (n_O_I * frac_excited).value
-
-
-
-#     # --- Part B, C: 计算三条谱线产生的总不透明度 ---
-#     kappa_line_total = np.zeros_like(nu) # 为该大气层初始化总谱线不透明度
-#     print()
-#     # 遍历三联线中的每一条谱线
-#     for j in range(len(oxygen_lambdas_nm)):
-#         # 获取当前谱线的中心波长和频率
-#         line_lambda = oxygen_lambdas_nm[j]
-#         line_nu_center = (c.c / line_lambda).to(u.Hz).value
-
-#         # 为当前谱线计算其多普勒展宽和线型
-#         doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
-
-#         # Inside your loop, change your print statement to this:
-#         print(f"{j}th: doppler_width_nu = {doppler_width_nu.to(u.Hz)}")
-#         line_profile = (1.0 / (doppler_width_nu * np.sqrt(np.pi))) * \
-#                     np.exp(-(nu - line_nu_center)**2 / doppler_width_nu**2)
-
-#         # 为当前谱线计算其不透明度
-#         gf_value = 10**oxygen_log_gfs[j]
-#         kappa_line_single = (f_const * gf_value / rho) * n_absorbers * line_profile
-
-#         # 将当前谱线的贡献累加到总和中
-#         kappa_line_total += kappa_line_single
-
-#     # --- Part D: 计算连续谱不透明度，并与总的谱线不透明度相加 ---
-#     kappa_continuum = opac.kappa_cont(nu, np.log10(P), T) / rho
-#     kappa_total_nu[:, i] = kappa_continuum + kappa_line_total
-
-
-# # # With the total opacity calculated, we can now compute the final spectrum
-# print("Computing final spectrum...")
-# H = compute_H(wave, Ts, tau_grid, kappa_total_nu, kappa_bars)
-
-
-
-
-
-# --- calculate for each emission line  ---
-for line_index in range(len(oxygen_lambdas_nm)):
-
-    current_line_lambda = oxygen_lambdas_nm[line_index]
-    print(f"\n--- Calculating for line: {current_line_lambda.to_value(u.nm):.4f} nm ---")
-
-    # an empty list to store kappa
-    kappa_total_nu = np.empty((len(wave), len(tau_grid)))
-    nu = (c.c / wave).to(u.Hz).value
-    f_const = (np.pi * c.e.gauss**2 / c.m_e / c.c).cgs.value
-
-    # interate over each layer of atmosphere
-    for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
-        # Get the log_tau value for the current layer
-        current_log_tau = log_tau_grid[valid_indices][i]
-        # Use the new interpolator to get electron pressure from the table
-        Pe_cgs = f_pe_from_tau(current_log_tau) # Electron pressure in dyn/cm^2
-
-        # Convert electron pressure (Pe) to electron number density (n_e)
-        # using the ideal gas law for electrons: Pe = n_e * k_B * T
-        n_e = Pe_cgs / (c.k_B.cgs.value * T) # n_e in cm^-3
-
-        # Now that we have n_e and T, call the core saha function directly
-        # This is much faster than the solver ns_from_rho_T
-        rho_check, mu, Ui, ns = eos.saha(n_e, T)
-
-        current_T = T * u.K
-        current_rho = rho * u.g / u.cm**3
-        # n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
-        O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
-        n_O_I = ns[3 * O_ix]
-        current_Z_T = eos.get_Z_O_I(T)
-        frac_excited = eos.calculate_excitation_fraction(
-            current_T, oxygen_g_i, oxygen_chi_i, current_Z_T
-        )
-        n_absorbers = (n_O_I * frac_excited).value
-
-
-
-        print(f"line_index: {line_index}: n_absorbers: {n_absorbers}")
-
-        line_nu_center = (c.c / current_line_lambda).to(u.Hz).value
-        # doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
-        # line_profile = (1.0 / (doppler_width_nu.value * np.sqrt(np.pi))) * \
-        #                np.exp(-(nu - line_nu_center)**2 / doppler_width_nu.value**2)
-
-        # 1. 计算多普勒宽度 (和以前一样)
-        doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
-
-        # 2. 【新增】计算 Voigt Profile 所需的两个参数
-        sigma_gauss = doppler_width_nu.value / np.sqrt(2)
-        # 为洛伦兹增宽估算一个合理的阻尼常数 gamma (单位: Hz)
-        # 这是一个近似值，但能很好地体现出碰撞增宽的效应
-        gamma_lorentz = 3e8 # 这是一个合理的数量级估算
-
-        # 3. 【修改】使用 voigt_profile 函数计算谱线轮廓
-        # 注意：voigt_profile 函数本身已经归一化，所以我们不需要再乘以归一化因子
-        # 函数的第一个参数是频率点到中心频率的距离
-        line_profile = voigt_profile(nu - line_nu_center, sigma_gauss, gamma_lorentz)
-
+# S_matrix has shape (num_wavelengths, num_layers).
+def compute_H_NLTE(wave, Ts, tau_grid, kappa_nu_bars, kappa_bars, S_matrix):
+    Hlambda = np.zeros(len(wave))
+    for i, w in enumerate(wave):
+        tau_nu  = cumulative_trapezoid(kappa_nu_bars[i]/kappa_bars, x=tau_grid, initial=0)
         
-        gf_value = 10**oxygen_log_gfs[line_index]
-        kappa_line = (f_const * gf_value / rho) * n_absorbers * line_profile
+        # Unlike the LTE solver, use the NLTE source function provided in S_matrix instead of B_nu.
+        Slambda = S_matrix[i, :] 
+        
+        Hlambda[i] = 0.5*(Slambda[0]*expn(3,0) + \
+		np.sum((Slambda[1:]-Slambda[:-1])/(tau_nu[1:]-tau_nu[:-1])*\
+			(expn(4,tau_nu[:-1])-expn(4,tau_nu[1:]))))
+    return Hlambda
 
-        # continuum kappa + single line kappa 
-        kappa_continuum = opac.kappa_cont(nu, np.log10(P), T) / rho
-        kappa_total_nu[:, i] = kappa_continuum + kappa_line
 
-    #  spectrum for a single line
-    H_single_line = compute_H(wave, Ts, tau_grid, kappa_total_nu, kappa_bars)
+# Reference equivalent widths (pm) from Asplund et al. (2004) Table 3 for the O I triplet.
+table_W_lambda_list_pm = [7.12, 6.18, 4.88]
+all_normalized_flux_lte = {}
+all_normalized_flux_nlte = {}
 
-    plt.figure(figsize=(15, 7))
-    plt.plot(wave.to_value(u.nm), H_single_line, label='Synthetic Spectrum', lw=1)
-    plt.xlabel('Wavelength (nm)')
-    plt.ylabel('Flux')
-    plt.title('Visually Inspecting the Continuum for Normalization')
-    plt.grid(True, linestyle='--', alpha=0.6)
+Lambda_mat = lambda_matrix(tau_grid)
+identity_mat = np.identity(len(tau_grid))
+
+# Each iteration recomputes the full opacity and emergent spectrum for one oxygen abundance.
+for A_O_log in trial_abundances:
+    print(f"{'='*60}")
+    print(f"--- Running model for log A(O) = {A_O_log:.2f} ---")
+    print(f"{'='*60}")
+
+    print("\n--- Step 1: Calculating the physically correct combined spectrum ---")
+    # kappa_total_nu = np.empty((len(wave), len(tau_grid)))
+    # nu = (const.c / wave).to(u.Hz).value
+
+    epsilon_profile = np.zeros(len(tau_grid))
+
+    for i, (T, P, _) in enumerate(zip(Ts, Ps, rhos)):
+
+        try:
+            # We must pass astropy units to this function.
+            P_with_units = P * u.dyne / u.cm**2
+            T_with_units = T * u.K
+
+            # This is the new core of our EOS calculation. It's a solver.
+            n_e, ns, _mu, _Ui, rho_check = eos.ns_from_P_T(P_with_units, T_with_units, A_O_log=A_O_log)
+
+            # For later use, get the unitless values
+            n_e_val = n_e.cgs.value
+            ns_val = ns.cgs.value
+            n_H_val = ns_val[0] + ns_val[1] + ns_val[2]
+
+            n_e_q = n_e_val * u.cm**-3
+            n_H_q = n_H_val * u.cm**-3
+
+            weigthed_eps_sum = 0.0
+            f_sum = 0.0
+
+            for comp in OI_TRIPLET:
+                C_ul_val = cr.derive_C_ul(
+                        T_with_units,
+                        n_e_q,
+                        n_H_q,
+                        comp["E_l"],
+                        comp["E_u"],
+                        comp["f"],
+                        comp["J_l"],
+                        comp["J_u"]
+                ) * u.s**-1
+
+                epsilon_k = (C_ul_val / (comp["A_ul"] + C_ul_val)).value
+                weigthed_eps_sum += comp["f"] * epsilon_k
+                f_sum += comp["f"]
+
+            epsilon_profile[i] = weigthed_eps_sum / f_sum
+            
+
+            rho_check_val = rho_check # rho_check is already a float in g/cm^3
+
+
+            # a) Calculate Continuum Opacity
+            kappa_continuum = opac.kappa_cont(nu, T, nHI=ns_val[0], nHII=ns_val[1], nHm=ns_val[2], ne=n_e_val)
+
+            # b) Calculate Opacity from all Weak Lines
+            # We pass a microturbulence value, a key piece of the new physics.
+            kappa_weak_lines = opac.weak_line_kappa(nu0, dlnu, Nnu, T, ns_vector=ns_val, microturb=1.5)
+
+            # c) Calculate Opacity from all Strong Lines
+            # This function includes detailed broadening physics (microturbulence, Stark, etc.)
+            kappa_strong_lines = opac.strong_line_kappa(nu0, dlnu, Nnu, T, n_e=n_e_val, ns_vector=ns_val, microturb=1.5)
+
+            # d) Sum all opacity sources (they are all in units of cm^-1)
+            total_kappa_per_volume = kappa_continuum + kappa_weak_lines + kappa_strong_lines
+
+            # e) Convert to mass absorption coefficient (cm^2/g) using the SELF-CONSISTENT rho_check
+            # This is the final, physically accurate opacity for this atmospheric layer.
+            kappa_nu_bars[:, i] = total_kappa_per_volume / rho_check_val
+
+            # --- CHECKPOINT: Print values to verify ---
+            # We print every 5 layers to avoid too much output.
+            if i % 5 == 0:
+
+                current_log_tau = log_tau_grid[valid_indices][i]
+                print(f"log(tau)={current_log_tau:.2f} | T={T:.0f}K | log(P)={np.log10(P):.2f} -> Solved n_e={n_e_val:.2e} cm^-3, Solved rho={rho_check_val:.2e} g/cm^3")
+
+        except Exception as e:
+            current_log_tau = log_tau_grid[valid_indices][i]
+            raise RuntimeError(f'layer failure at log(tau)={current_log_tau:.2f}, T={T:.0f}K, P={P:.2e}: {e}')
+
+
+
+
+    # Restrict the NLTE solve to 776-779 nm around the O I triplet.
+    nlte_indices = np.where((wave_nm >= 776) & (wave_nm <= 779))[0]
+    nlte_wave_nm = wave_nm[nlte_indices]
+
+    epsilon_vec = np.clip(epsilon_profile, 1e-6, 1.0)
+    print("="*40)
+    print(f"epsilon_vec = {epsilon_vec}")
+    print("="*40)
+    epsilon_mat = np.diag(epsilon_vec)
+    
+    # S_matrix stores the depth-dependent NLTE source function for each wavelength.
+    S_matrix = np.empty((len(nlte_wave_nm), len(tau_grid)))
+
+    # Solve the simplified Lambda-operator problem for every wavelength in the window.
+    for i in range(len(nlte_wave_nm)):
+        current_wave = nlte_wave_nm[i]
+        
+        # Adopt a constant photon destruction probability epsilon to mimic scattering dominance in the core.
+        # epsilon_val = 0.01
+        # epsilon_vec = np.full_like(tau_grid, epsilon_val)
+        # epsilon_mat = np.diag(epsilon_vec)
+        
+        B_vector = planck_nu(Ts, current_wave)
+
+        # Assemble A = I - (1-epsilon)Lambda and b = epsilon*B and solve for S.
+        A_mat = identity_mat - np.dot((identity_mat - epsilon_mat), Lambda_mat)
+        b_vector = np.dot(epsilon_mat, B_vector)
+        
+        S_vector = np.linalg.solve(A_mat, b_vector)
+        
+        S_matrix[i, :] = S_vector
+
+    print("NLTE Source Function calculation complete!")
+
+    H_nlte = compute_H_NLTE(
+        nlte_wave_nm * u.nm, 
+        Ts, 
+        tau_grid, 
+        kappa_nu_bars[nlte_indices, :], 
+        kappa_bars, 
+        S_matrix
+    )
+
+    print("\nStarting NLTE spectrum analysis...")
+
+    print("Starting LTE spectrum analysis...")
+    H_lte = compute_H(
+        nlte_wave_nm * u.nm,
+        Ts,
+        tau_grid,
+        kappa_nu_bars[nlte_indices, :],
+        kappa_bars
+    )
+
+
+
+    print("\nOpacity calculation for all layers complete. Now computing the emergent spectrum...")
+    print("This may take a moment...")
+
+    print("Spectrum calculation complete!")
+
+    # Apply macroturbulent, rotational, and instrumental broadening.
+    print("Applying final broadening (macroturbulence, rotation, instrumental)...")
+
+    # Define broadening parameters in km/s. These are typical values for the Sun.
+    macro_v = 2.0  # Macroturbulence velocity
+    rot_v = 1.9    # Rotational velocity of the Sun
+    inst_v = 2.5   # Instrumental broadening (simulating a spectrograph's resolution)
+
+    # Total broadening width (added in quadrature)
+    width_v = np.sqrt(macro_v**2 + rot_v**2 + inst_v**2)
+
+    # Convert the velocity width to a Gaussian width in nm at 777 nm.
+    width_nm = width_v / (const.c.to(u.km/u.s).value) * 777.0
+
+    # The wavelength grid is logarithmic, so compute the local spacing near 777 nm.
+    idx_777 = np.argmin(np.abs(nlte_wave_nm - 777.0))
+    dx_nm_local = np.abs(nlte_wave_nm[idx_777] - nlte_wave_nm[idx_777 - 1])
+    width_pixels = width_nm / dx_nm_local
+
+
+    x_kernel_range = int(5 * width_pixels)
+    x_kernel = np.arange(-x_kernel_range, x_kernel_range + 1)
+    gaussian_kernel = np.exp(-x_kernel**2 / (2 * width_pixels**2))
+    gaussian_kernel /= np.sum(gaussian_kernel) # Normalize the kernel
+    
+
+
+
+    # Convolve the high-resolution spectrum with the kernel to get the final broadened spectrum
+    H_broadened_nlte = np.convolve(H_nlte, gaussian_kernel, mode='same')
+    H_broadened_lte = np.convolve(H_lte, gaussian_kernel, mode='same')
+
+    ########## ########## ########## ########## ########## ########## ##########
+    # --- Raw (un-normalized) flux comparison in the NLTE window ---
+    line_centers_nm = np.array([777.1944, 777.4166, 777.5388])
+
+    # Indices nearest to each line center
+    center_ix = [np.argmin(np.abs(nlte_wave_nm - lc)) for lc in line_centers_nm]
+
+    # Global minima in the plotted window (raw, broadened)
+    nlte_min_flux = H_broadened_nlte.min()
+    lte_min_flux  = H_broadened_lte.min()
+    nlte_min_wave = nlte_wave_nm[H_broadened_nlte.argmin()]
+    lte_min_wave  = nlte_wave_nm[H_broadened_lte.argmin()]
+
+    print("\n--- Raw broadened flux (no normalization) ---")
+    print(f"Global min NLTE: {nlte_min_flux:.6f} at {nlte_min_wave:.4f} nm")
+    print(f"Global min  LTE: {lte_min_flux:.6f} at {lte_min_wave:.4f} nm")
+
+    # Values at the nominal line centers
+    for lc, ix in zip(line_centers_nm, center_ix):
+        print(f"{lc:.4f} nm -> NLTE {H_broadened_nlte[ix]:.6f} | LTE {H_broadened_lte[ix]:.6f}")
+
+    # Plot raw fluxes to visually compare depth without any continuum fitting
+    plt.figure(figsize=(10, 5))
+    plt.plot(nlte_wave_nm, H_broadened_nlte, label=f'NLTE raw (log A(O)={A_O_log:.2f})', color='tab:purple')
+    plt.plot(nlte_wave_nm, H_broadened_lte,  label=f'LTE  raw (log A(O)={A_O_log:.2f})', color='tab:orange', alpha=0.85)
+
+    for lc in line_centers_nm:
+        plt.axvline(lc, color='k', ls=':', alpha=0.3)
+
+    plt.xlabel('Wavelength [nm]')
+    plt.ylabel('H (raw, broadened)')
+    plt.title('Raw broadened flux (no normalization)')
+    plt.grid(True, ls=':')
     plt.legend()
-    plt.savefig(f"{line_index} get_continum_spectrum")
+    plt.tight_layout()
+    plt.savefig(f'raw_broadened_flux_{A_O_log:.2f}.png', dpi=200)
     plt.show()
+    # --- end raw flux check ---
+ ########## ########## ########## ########## ##########
 
-    wave_nm = wave.to_value(u.nm)
-    indices_1 = np.where((wave_nm >= 775.0) & (wave_nm <= 776.5))
-    indices_2 = np.where((wave_nm >= 778.5) & (wave_nm <= 780.0))
-    continuum_indices = np.concatenate((indices_1[0], indices_2[0]))
+    print("Broadening complete.")
 
-    # 从完整光谱中提取出这些锚点的波长和流量值
-    continuum_wavelengths = wave_nm[continuum_indices]
-    continuum_fluxes = H_single_line[continuum_indices]
+    # Measure equivalent widths and compare them with observations.
+    print("\n--- Final Analysis: Equivalent Width Comparison ---")
 
-    # 用一次多项式（直线）来拟合这些锚点 (如果连续谱是弯的，第二个参数可以改成2)
-    p = np.polyfit(continuum_wavelengths, continuum_fluxes, 1)
-    continuum_fit_function = np.poly1d(p)
+    # Step 1: normalise the broadened spectrum using continuum windows on each side of the triplet.
+    continuum_indices = np.where(
+        ((nlte_wave_nm >= 776.5) & (nlte_wave_nm <= 777.0)) | 
+        ((nlte_wave_nm >= 778.0) & (nlte_wave_nm <= 778.5))
+    )[0]
 
-    # 使用拟合函数计算出每一个波长点上的连续谱理论值
-    continuum_level_fit = continuum_fit_function(wave_nm)
+    # Fit a straight line to the continuum samples and divide it out to get unit continuum.
+    p_fit_nlte  = np.polyfit(nlte_wave_nm[continuum_indices], H_broadened_nlte[continuum_indices], 1)
+    continuum_fit_nlte = np.poly1d(p_fit_nlte)
+    flux_normalized_nlte = H_broadened_nlte / continuum_fit_nlte(nlte_wave_nm)
 
-    # 用这个精确的连续谱来归一化整个光谱
-    model_flux_normalized_single = H_single_line / continuum_level_fit
-
-    # --- equivelent width for a single line  ---
-    # continuum_level_single = H_single_line[0]
-    # model_flux_normalized_single = H_single_line / continuum_level_single
-
-    d_wave_nm = wave[1].to_value(u.nm) - wave[0].to_value(u.nm)
-    model_W_lambda_nm = np.sum(1.0 - model_flux_normalized_single) * d_wave_nm
-    model_W_lambda_pm = model_W_lambda_nm * 1000
-
-
-    model_W_lambda_list_pm.append(model_W_lambda_pm)
+    p_fit_lte = np.polyfit(nlte_wave_nm[continuum_indices], H_broadened_lte[continuum_indices], 1)
+    continuum_fit_lte = np.poly1d(p_fit_lte)
+    flux_normalized_lte = H_broadened_lte / continuum_fit_lte(nlte_wave_nm)
 
 
 
+    # Step 2: integrate the equivalent width of each component of the O I triplet.
+    # Central wavelengths of the three O I triplet lines in nm
+    line_centers_nm = [777.1944, 777.4166, 777.5388]
+    # Observed EWs from Asplund's paper in pm (pico-meters)
+    table_W_lambda_list_pm = [7.12, 6.18, 4.88]
 
-# --- For plotting spectrum simulation ，recalculate kappa_line_total for all three lines ---
-print("\nRecalculating combined spectrum for plotting...")
-kappa_total_nu = np.empty((len(wave), len(tau_grid)))
+    # Define integration boundaries for each line (in nm)
+    boundaries = [
+        (777.05, 777.30),   # Range for the 1st line
+        (777.30, 777.48),   # Range for the 2nd line
+        (777.48, 777.65)    # Range for the 3rd line
+    ]
 
+    # Loop through each line to calculate and compare its EW
 
-n_absorbers_list = []
+    model_EW_results_nlte = []
+    model_EW_results_lte = [] 
+    for i in range(len(line_centers_nm)):
+        table_W = table_W_lambda_list_pm[i]
+        min_wave, max_wave = boundaries[i]
+        
+        # Find the indices of our wavelength array that fall within the boundaries
+        line_indices = np.where((nlte_wave_nm >= min_wave) & (nlte_wave_nm < max_wave))[0]
+        
+        # Compute the local wavelength step (grid is logarithmic).
+        d_wave_nm = np.abs(nlte_wave_nm[line_indices][1:] - nlte_wave_nm[line_indices][:-1])
 
+        # Approximate the integral sum[(1 - F) d_lambda] using the left-hand rule.
 
-for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
-    current_T = T * u.K
-    current_rho = rho * u.g / u.cm**3
-    # n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
-    O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
-    n_O_I = ns[3 * O_ix]
-    current_Z_T = eos.get_Z_O_I(T)
-    frac_excited = eos.calculate_excitation_fraction(current_T, oxygen_g_i, oxygen_chi_i, current_Z_T)
-    n_absorbers = (n_O_I * frac_excited).value
-
-    n_absorbers_list.append(n_absorbers)
-
-    kappa_line_total = np.zeros_like(nu)
-    for j in range(len(oxygen_lambdas_nm)): 
-        line_lambda = oxygen_lambdas_nm[j]
-        line_nu_center = (c.c / line_lambda).to(u.Hz).value
-        doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
-        line_profile = (1.0 / (doppler_width_nu.value * np.sqrt(np.pi))) * np.exp(-(nu - line_nu_center)**2 / doppler_width_nu.value**2)
-        gf_value = 10**oxygen_log_gfs[j]
-        kappa_line_single = (f_const * gf_value / rho) * n_absorbers * line_profile
-        kappa_line_total += kappa_line_single
-    kappa_continuum = opac.kappa_cont(nu, np.log10(P), T) / rho
-    kappa_total_nu[:, i] = kappa_continuum + kappa_line_total
-
-
-
-# --- Print all results ---
-print("\n--- Final Equivalent Width Comparison ---")
-for i in range(len(oxygen_lambdas_nm)):
-    model_W = model_W_lambda_list_pm[i]
-    table_W = table_W_lambda_list_pm[i]
-    lambda_nm = oxygen_lambdas_nm[i].to_value(u.nm)
+        model_W_lambda_nm_nlte = np.sum((1.0 - flux_normalized_nlte[line_indices][:-1]) * d_wave_nm)
+        model_EW_results_nlte.append(model_W_lambda_nm_nlte * 1000)
+        
+        # Convert from nanometers (nm) to pico-meters (pm)
+        model_W_lambda_pm = model_W_lambda_nm_nlte * 1000
     
-    print(f"Line {lambda_nm:.4f} nm:")
-    print(f"  Model Equivalent Width:    {model_W:.2f} pm")
-    print(f"  Observed Equivalent Width: {table_W:.2f} pm")
-    if model_W > table_W:
-        print("  --> Model line is STRONGER than observed.")
-    elif model_W < table_W:
-        print("  --> Model line is WEAKER than observed.")
-    else:
-        print("  --> Model matches observation well.")
 
-plt.figure(figsize=(8, 6))
-# 使用 semilogy 来让 Y 轴以对数形式呈现
-plt.semilogy(log_tau_grid[valid_indices], n_absorbers_list)
-plt.xlabel('log($\\tau_{500}$)')
-plt.ylabel('Number of Absorbers ($N_{abs}$ per cm$^3$)')
-plt.title('Calculated Oxygen Absorber Density vs. Depth in Sun')
-plt.grid(True)
-plt.savefig("n_absorbers_plot")
-plt.show()
+        model_W_lambda_nm_lte = np.sum((1.0 - flux_normalized_lte[line_indices][:-1]) * d_wave_nm)
+        model_EW_results_lte.append(model_W_lambda_nm_lte * 1000)
+        
 
+        # Print the final comparison for this line
+        print(f"\nLine {line_centers_nm[i]:.4f} nm (A(O)={A_O_log:.2f}):")
+        print(f"  NLTE Model EW: {model_EW_results_nlte[i]:.2f} pm")
+        print(f"  LTE Model EW:  {model_EW_results_lte[i]:.2f} pm")
+        print(f"  Observed EW:   {table_W_lambda_list_pm[i]:.2f} pm")
 
+        diff = (model_W_lambda_pm - table_W) / table_W * 100
+        if diff > 0:
+            print(f"  --> Model line is {diff:.1f}% STRONGER than observed.")
+        else:
+            print(f"  --> Model line is {abs(diff):.1f}% WEAKER than observed.")
 
-# ---- ADD THIS ENTIRE BLOCK BACK IN ----
-# Recalculate the combined spectrum for plotting
-print("\nRecalculating combined spectrum for plotting...")
-kappa_total_nu = np.empty((len(wave), len(tau_grid)))
-for i, (T, P, rho) in enumerate(zip(Ts, Ps, rhos)):
-    current_T = T * u.K
-    current_rho = rho * u.g / u.cm**3
-    # n_e, ns, mu, Ui = eos.ns_from_rho_T(current_rho, current_T)
-    O_ix = np.where(eos.solarmet()[-1] == 'O')[0][0]
-    n_O_I = ns[3 * O_ix]
-    current_Z_T = eos.get_Z_O_I(T)
-    frac_excited = eos.calculate_excitation_fraction(current_T, oxygen_g_i, oxygen_chi_i, current_Z_T)
-    n_absorbers = (n_O_I * frac_excited).value
-    kappa_line_total = np.zeros_like(nu)
-    for j in range(len(oxygen_lambdas_nm)): # This loop sums the opacity of all 3 lines
-        line_lambda = oxygen_lambdas_nm[j]
-        line_nu_center = (c.c / line_lambda).to(u.Hz).value
-        doppler_width_nu = np.sqrt(2 * c.k_B * current_T / (16 * c.u)) / c.c * line_nu_center
-        line_profile = (1.0 / (doppler_width_nu.value * np.sqrt(np.pi))) * np.exp(-(nu - line_nu_center)**2 / doppler_width_nu.value**2)
-        gf_value = 10**oxygen_log_gfs[j]
-        kappa_line_single = (f_const * gf_value / rho) * n_absorbers * line_profile
-        kappa_line_total += kappa_line_single
-    kappa_continuum = opac.kappa_cont(nu, np.log10(P), T) / rho
-    kappa_total_nu[:, i] = kappa_continuum + kappa_line_total
+        all_normalized_flux_lte[A_O_log] = flux_normalized_lte
+        all_normalized_flux_nlte[A_O_log] = flux_normalized_nlte
 
-H = compute_H(wave, Ts, tau_grid, kappa_total_nu, kappa_bars)
-# ----------------------------------------
+    # Store the results for this abundance value
+    results_list.append({
+        'abundance': A_O_log,
+        'model_EW_pm_nlte': model_EW_results_nlte,
+        'model_EW_pm_lte': model_EW_results_lte
+    })
 
+# --- NEW: Final Analysis and Plotting of All Results ---
+print(f"{'='*60}")
+print("--- Final Analysis of All Abundance Trials ---")
+print(f"{'='*60}")
 
+# Observed EWs from Asplund's paper in pm
+observed_EW = np.array([7.12, 6.18, 4.88])
+line_centers_nm = np.array([777.1944, 777.4166, 777.5388])
+best_fit_abundances_nlte = []
+best_fit_abundances_lte = []
 
+print("\nRendering LTE and NLTE spectra for every trial abundance...")
 
-print("Plotting results...")
+plt.figure(figsize=(14, 8))
 
-plt.figure(figsize=(12, 7)) # 创建一个大小合适的画布
+# Use a colour map so LTE/NLTE pairs share the same base colour.
+colors = plt.cm.viridis(np.linspace(0, 1, len(trial_abundances)))
 
-# --- Part 1: Load and Process Observational Data using Pandas ---
-try:
-    # 使用你建议的 pandas 方法读取原始文件
-    obs_data = pd.read_csv('spectrum.txt', header=0, sep='\s*,\s*', usecols=[0, 1], engine='python')
-    
-    # 自动获取列名
-    obs_wave_col = obs_data.columns[0]
-    obs_intensity_col = obs_data.columns[1]
+for i, abundance in enumerate(trial_abundances):
+    flux_nlte = all_normalized_flux_nlte[abundance]
+    flux_lte = all_normalized_flux_lte[abundance]
 
-    # 从 pandas DataFrame 中获取数据
-    obs_wave_aa = obs_data[obs_wave_col].values
-    obs_flux_raw = obs_data[obs_intensity_col].values
-    print("Successfully loaded spectrum.txt using pandas.")
+    plt.plot(nlte_wave_nm, flux_nlte, 
+             color=colors[i],
+             linestyle='-',
+             label=f'NLTE log A(O) = {abundance:.2f}')
 
-    # --- Part 2: Process and Plot Data (same logic as before) ---
-    
-    # a) Process observational data
-    obs_wave_nm = obs_wave_aa / 10.0  # Convert Angstroms to nm
-    obs_flux_normalized = obs_flux_raw / obs_flux_raw.max() # Normalize
+    plt.plot(nlte_wave_nm, flux_lte, 
+             color=colors[i],
+             linestyle='--',
+             label=f'LTE  log A(O) = {abundance:.2f}')
 
-    # b) Process model data
-    continuum_level = H[0] # Continuum is the flux at the first wavelength point
-    model_flux_normalized = H / continuum_level
-
-    # c) Plot both datasets
-    # Plot our theoretical model (Blue line)
-    # The 'wave' variable is already in nm from our calculation
-    plt.plot(wave.to(u.nm).value, model_flux_normalized, lw=2, label=f'Model (3 lines)')
-
-    # Plot the real observation (Red dashed line)
-    plt.plot(obs_wave_nm, obs_flux_normalized, '--r', label='Observed Sun')
-
-except FileNotFoundError:
-    print("Error: 'spectrum.txt' not found. Skipping observation plot.")
-    # If the observation file isn't found, just plot the model
-    plt.plot(wave.to(u.nm).value, H, lw=2, label=f'Model Flux (log A(O) = ?)')
-
-
-# --- Part 3: Finalize and Show Plot ---
-plt.title('Solar Spectrum vs. Model near O I Triplet')
-plt.xlabel('Wavelength (nm)')
+plt.xlabel('Wavelength [nm]')
 plt.ylabel('Normalized Flux')
-plt.xlim(777.1, 777.7)  # Zoom in on the line
-plt.ylim(0.6, 1.05)   # Zoom in to see the line depth clearly
-plt.grid(True, linestyle=':', alpha=0.6)
-plt.legend()
+plt.title('LTE vs NLTE spectra as a function of oxygen abundance')
 
-plt.savefig('final_comparison_triplet.png', dpi=300)
-print("最终光谱对比图已成功保存为 final_comparison_triplet.png")
+plt.xlim(777.1, 777.3)
+
+plt.legend(title="Line Type & Abundance", fontsize='small')
+
+plt.grid(True, linestyle=':', alpha=0.6)
+
+plt.savefig('spectrum_all_abundances_LTE_NLTE.png', dpi=300)
+print("Saved LTE/NLTE comparison plot to spectrum_all_abundances_LTE_NLTE.png")
+
 plt.show()
 
+plt.figure(figsize=(12, 8))
+colors = ['blue', 'green', 'red']
+
+# For each line, plot its curve of growth and find the best fit
+for i in range(len(line_centers_nm)):
+    abundances = [res['abundance'] for res in results_list]
+    
+    model_ews_nlte = [res['model_EW_pm_nlte'][i] for res in results_list]
+    model_ews_lte = [res['model_EW_pm_lte'][i] for res in results_list]
+
+    plt.plot(abundances, model_ews_nlte, 'o-', label=f'NLTE Model {line_centers_nm[i]:.2f} nm', color=colors[i])
+    plt.plot(abundances, model_ews_lte, 'x--', label=f'LTE Model {line_centers_nm[i]:.2f} nm', color=colors[i], alpha=0.7)
+
+    plt.axhline(y=observed_EW[i], linestyle=':', color=colors[i], label=f'Observed {line_centers_nm[i]:.2f} nm')
+
+    fit_ab_nlte = np.interp(observed_EW[i], model_ews_nlte, abundances)
+    best_fit_abundances_nlte.append(fit_ab_nlte)
+    
+    fit_ab_lte = np.interp(observed_EW[i], model_ews_lte, abundances)
+    best_fit_abundances_lte.append(fit_ab_lte)
+    
+    print(f"Line {line_centers_nm[i]:.2f} nm -> Best-fit NLTE Abundance: {fit_ab_nlte:.3f}, Best-fit LTE Abundance: {fit_ab_lte:.3f}")
+
+# Summarise the abundance inferences.
+avg_nlte_abundance_fit = np.mean(best_fit_abundances_nlte)
+print(f"\nAverage best-fit NLTE abundance (before correction): {avg_nlte_abundance_fit:.3f}")
+nlte_correction = -0.24 # From Asplund et al. (2004) Table 2, for 777.41 nm line
+final_nlte_abundance = avg_nlte_abundance_fit
+print(f"Final NLTE Oxygen Abundance: log A(O) = {final_nlte_abundance:.3f}")
+
+# Cross-check: infer abundance from the LTE curve of growth and apply the literature NLTE correction.
+avg_lte_abundance_fit = np.mean(best_fit_abundances_lte)
+print(f"\nAverage best-fit LTE abundance: {avg_lte_abundance_fit:.3f}")
+corrected_lte_abundance = avg_lte_abundance_fit + nlte_correction
+print(f"LTE abundance + paper's NLTE correction ({nlte_correction:.2f} dex) = {corrected_lte_abundance:.3f}")
+print(f"(This should be close to your direct NLTE result of {final_nlte_abundance:.3f})")
+
+
+plt.title('Equivalent Width vs. Oxygen Abundance')
+plt.xlabel('Log Oxygen Abundance [log A(O)]')
+plt.ylabel('Equivalent Width [pm]')
+plt.grid(True)
+plt.legend()
+plt.savefig('abundance_fit.png', dpi=300)
+print("Curve of growth plot saved as abundance_fit.png")
+plt.show()

@@ -82,7 +82,8 @@ for i in range(number_of_elements):
     log10ns.append(interp_func)
 log10ne = RectBivariateSpline(Ps_log10, Ts, np.log10(ne_table))
 
-def weak_line_kappa(nu0, dlnu, N_nu, log10P, T, microturb=1.5):
+
+def weak_line_kappa(nu0, dlnu, N_nu, T, ns_vector, microturb=1.0):
     """ For all atomic and ion species, compute the weak line opacities.
     nu0: Start frequency in Hz
     dlnu: delta log(nu)
@@ -116,10 +117,10 @@ def weak_line_kappa(nu0, dlnu, N_nu, log10P, T, microturb=1.5):
             # Number density
             elt_ix = np.where(elt_names == name)[0][0]
             if ion_state == 1:
-                n = 10**(log10ns[3*elt_ix](log10P, T)[0][0])
+                n = ns_vector[3*elt_ix]
                 Zpart = gI[elt_ix]
             elif ion_state == 2:
-                n = 10**(log10ns[3*elt_ix + 1](log10P, T)[0][0])
+                n = ns_vector[3*elt_ix + 1]
                 Zpart = gII[elt_ix]
 
             # Opacity
@@ -148,12 +149,15 @@ def weak_line_kappa(nu0, dlnu, N_nu, log10P, T, microturb=1.5):
             
     return kappa
 
-def strong_line_kappa(nu0, dlnu, N_nu, log10P, T, microturb=2.0):
+
+def strong_line_kappa(nu0, dlnu, N_nu, T, n_e, ns_vector, microturb=2.0):
     """ For all atomic and ion species, compute the strong line opacities.
     nu0: Start frequency in Hz
     dlnu: delta log(nu)
     N_nu: number of frequencies
     log10P: Log10 of pressure in dyne/cm^2
+    n_e: float, electron number density in cm^-3
+    ns_vector: A 1D numpy array containing all number densities from the EOS.
     T: Temperature in K
     microturb: Microturbulence parameter (default is 2.0 km/s)
     """
@@ -164,9 +168,6 @@ def strong_line_kappa(nu0, dlnu, N_nu, log10P, T, microturb=2.0):
     # Get unique elements and ions from strong_lines
     strong_line_elts = np.unique(strong_lines['element_name'])
     
-    # Find the current n_e and N_H (needed for broadening)
-    n_e = 10**(log10ne(log10P, T)[0][0])
-    n_H = 10**(log10ns[0](log10P, T)[0][0])
 
     # Loop through all elements
     for name in strong_line_elts:
@@ -184,12 +185,19 @@ def strong_line_kappa(nu0, dlnu, N_nu, log10P, T, microturb=2.0):
             elt_ix = np.where(elt_names == name)[0][0]
             
             # Number density
+            # --- REVISED AND MORE ACCURATE CODE BLOCK ---
+            # Number density and Partition Function
             if ion_state == 1:
-                n = 10**(log10ns[3*elt_ix](log10P, T)[0][0])
+                n = ns_vector[3*elt_ix]
+
+                # Use the simplified ground state degeneracy for all other neutral elements
                 Zpart = gI[elt_ix]
+                # --- END OF SPECIAL CASE ---
             elif ion_state == 2:
-                n = 10**(log10ns[3*elt_ix + 1](log10P, T)[0][0])
+                n = ns_vector[3*elt_ix + 1]
+                # For ionized species, we'll stick to the simplified method for now
                 Zpart = gII[elt_ix]
+            # --- END OF REVISED BLOCK ---
             
             # Pre-compute Doppler velocity for this element (optimization 3)
             doppler_v = np.sqrt(2*(c.k_B* T*u.K) / (masses[elt_ix]*u.u)).to(u.km/u.s).value
@@ -306,22 +314,20 @@ def Hff(nu, T):
     #FIXME : Remove the approximation
     return Hff_const /nu**3/np.sqrt(T)
 
-def kappa_cont(nu, log10P, T):
+def kappa_cont(nu, T, nHI, nHII, nHm, ne):
     """Compute the continuum opacity in cgs units as a function of
-    log pressure (CGS) and K.
+    temperature in K and number densities.
     
     Parameters:
     nu: numpy array
-    log10P: float
-    T: float
+    T: float, Temperature in K
+    nHI, nHII, nHm, ne: float, number densities in cm^-3
     """
-    nHI = 10**(log10ns[0](log10P, T, grid=False))
-    nHII = 10**(log10ns[1](log10P, T, grid=False))
-    nHm = 10**(log10ns[2](log10P, T, grid=False))
-    ne = 10**(log10ne(log10P, T, grid=False))
+    # 現在函數直接使用傳入的數密度值，不再進行插值
     kappa = nHI * Hbf(nu, T) + nHII * ne * Hff(nu, T) + \
             nHm * Hmbf(nu, T) + nHI * ne * Hmff(nu, T)
     return kappa
+
 
 def kappa_cont_H(nu, T, nHI, nHII, nHm, ne):
     """Compute the continuum opacity in cgs units as a function of
