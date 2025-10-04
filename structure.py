@@ -27,7 +27,8 @@ from scipy.interpolate import interp1d
 from lambda_matrix import lambda_matrix
 import Collision_rate as cr
 from nlte_branch import spectrum_nlte, H_nlte_at_nu
-
+import matplotlib
+matplotlib.use("Agg")
 OI_77719 = {"E_l": 9.1460911*u.eV, "E_u": 10.7409314*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 3, "A_ul": 3.69e7/u.s}
 OI_TRIPLET = [
     {"E_l": 9.1460911*u.eV, "E_u": 10.7409314*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 3, "A_ul": 3.69e7/u.s},
@@ -736,6 +737,7 @@ def main():
     plt.savefig('abundance_fit.png', dpi=300)
     print("Curve of growth plot saved as abundance_fit.png")
     plt.show()
+    plt.close('all')
 
 
 if __name__ == "__main__":
