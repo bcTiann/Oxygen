@@ -14,7 +14,15 @@ def tau_nu_from_ratio(tau_grid, kappa_ratio):
     return tau_nu
 
 
-def H_nlte_at_nu(nu_hz, tau_grid, kappa_ratio, T_of_tau, epsilon_profile, return_S=False):
+def H_nlte_at_nu(
+    nu_hz,
+    tau_grid,
+    kappa_ratio,
+    T_of_tau,
+    epsilon_profile,
+    return_S=False,
+    return_contrib=False,
+):
 
     eps = epsilon_profile
     eps = np.asarray(eps, dtype=float)
@@ -35,14 +43,23 @@ def H_nlte_at_nu(nu_hz, tau_grid, kappa_ratio, T_of_tau, epsilon_profile, return
     J = np.linalg.solve(I - Λ @ (I - np.diag(eps_clip)),
                         Λ @ (eps_clip * Bnus))
     S = (1 - eps_clip) * J + eps_clip * Bnus
-    H = (Φ @ S)[0]
+    
+    HS = Φ @ S
+    H = HS[0]
 
     try:
         H_val = H.cgs.value
     except Exception:
         H_val = np.asarray(H, float)
 
-    if not return_S:
+    contrib_val = None
+    if return_contrib:
+        try:
+            contrib_val = HS.cgs.value
+        except Exception:
+            contrib_val = np.asarray(HS, float)
+
+    if not return_S and not return_contrib:
         return H_val
 
     try:
@@ -50,7 +67,16 @@ def H_nlte_at_nu(nu_hz, tau_grid, kappa_ratio, T_of_tau, epsilon_profile, return
     except Exception:
         S_val = np.asarray(S, float)
 
-    return H_val, S_val
+    outputs = [H_val]
+    if return_S:
+        outputs.append(S_val)
+    if return_contrib:
+        outputs.append(contrib_val)
+
+    if len(outputs) == 1:
+        return outputs[0]
+
+    return tuple(outputs)
     
 
 def spectrum_nlte(wave_nm, tau_grid, kappa_all_nu_bars, kappa_R_bars,

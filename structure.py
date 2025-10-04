@@ -137,6 +137,12 @@ def parse_cli_args():
         type=int,
         help="Maximum number of worker processes when parallel execution is enabled.",
     )
+    parser.add_argument(
+        "--epsilon-scale",
+        type=float,
+        default=1.0,
+        help="Global multiplicative factor applied to the epsilon profile (default: 1.0).",
+    )
     return parser.parse_args()
 
 
@@ -196,6 +202,7 @@ def run_abundance_case(job):
     nu0 = job['nu0']
     dlnu = job['dlnu']
     Nnu = job['Nnu']
+    epsilon_scale = job.get('epsilon_scale', 1.0)
 
     epsilon_profile = np.zeros(len(tau_grid))
     kappa_nu_bars = np.empty((Nnu, len(tau_grid)))
@@ -243,6 +250,11 @@ def run_abundance_case(job):
         total_kappa_per_volume = kappa_continuum + kappa_weak_lines + kappa_strong_lines
 
         kappa_nu_bars[:, i] = total_kappa_per_volume / rho_val
+
+    if epsilon_scale != 1.0:
+        print(f"Scaling epsilon_profile by factor {epsilon_scale:.3f}")
+    epsilon_profile *= epsilon_scale
+    epsilon_profile = np.clip(epsilon_profile, 1e-4, 1.0)
 
     nlte_wave_nm = wave_nm[nlte_indices]
 
@@ -306,6 +318,7 @@ def run_abundance_case(job):
     )
 
     S_profiles = []
+    contrib_profiles = []
     for lc in line_centers_nm:
         local_idx = np.argmin(np.abs(nlte_wave_nm - lc))
         global_idx = nlte_indices[local_idx]
@@ -313,16 +326,18 @@ def run_abundance_case(job):
         nu_val = (const.c / (nlte_wave_nm[local_idx] * u.nm)).to(u.Hz).value
         kappa_ratio = kappa_nu_bars[global_idx, :] / kappa_bars
 
-        _, S_profile = H_nlte_at_nu(
+        _, S_profile, contrib_profile = H_nlte_at_nu(
             nu_val,
             tau_grid,
             kappa_ratio,
             Ts,
             epsilon_profile,
-            return_S=True
+            return_S=True,
+            return_contrib=True
         )
 
         S_profiles.append(np.clip(S_profile, 1e-300, None))
+        contrib_profiles.append(contrib_profile)
 
     result = {
         'abundance': A_O_log,
@@ -335,6 +350,7 @@ def run_abundance_case(job):
         'model_EW_pm_lte': model_EW_results_lte,
         'line_indices_list': line_indices_list,
         'S_profiles': np.array(S_profiles),
+        'contrib_profiles': np.array(contrib_profiles),
     }
 
     return result
@@ -350,6 +366,7 @@ def main():
     tables_dir = args.tables_dir
     regenerate_tables = args.regenerate_tables
     show_table_plot = args.show_table_plot
+    epsilon_scale = args.epsilon_scale
 
 
     # Solar T, P, and density profiles digitised from Asplund et al. (2004) Table 1.
@@ -475,6 +492,7 @@ def main():
             'nu0': nu0,
             'dlnu': dlnu,
             'Nnu': Nnu,
+            'epsilon_scale': epsilon_scale,
         })
 
     results = []
@@ -609,14 +627,45 @@ def main():
         plt.figure(figsize=(8, 5))
         for lc, S_profile in zip(line_centers_nm, S_profiles):
             plt.plot(log_tau, np.log10(S_profile), label=f'{lc:.3f} nm')
-        plt.xlabel('log10 Optical Depth Tau')
-        plt.ylabel('log10 Source Function S')
-        plt.title(f'Log S vs Log Tau (log A(O)={abundance:.2f})')
+        plt.xlabel(r'$\log_{10}\,\tau$')
+        plt.ylabel(r'$\log_{10} S$')
+        plt.title(f'$\log S$ vs $\log_{{10}}\tau$ (log A(O)={abundance:.2f})')
         plt.grid(True, linestyle=':', alpha=0.6)
         plt.legend(title='Line Center')
         plt.savefig(f'logS_vs_logtau_{abundance:.2f}.png', dpi=300)
         print(f"Saved log S vs log tau plot to logS_vs_logtau_{abundance:.2f}.png")
         plt.show()
+
+        contrib_profiles = res.get('contrib_profiles')
+        if contrib_profiles is not None and contrib_profiles.size:
+            plt.figure(figsize=(8, 5))
+            tau_positive = tau_grid[1:]
+            log_tau_positive = np.log10(tau_positive)
+
+            contrib_arrays = []
+            for lc, contrib in zip(line_centers_nm, contrib_profiles):
+                contrib_arr = np.asarray(contrib)[1:]
+                contrib_arrays.append(contrib_arr)
+                plt.plot(log_tau_positive, contrib_arr, label=f'{lc:.3f} nm')
+
+            combined = np.sum(contrib_arrays, axis=0) if contrib_arrays else None
+            if combined is not None and np.any(combined > 0):
+                threshold = 0.5 * np.max(combined)
+                mask = combined >= threshold
+                if np.any(mask):
+                    shaded_x = log_tau_positive[mask]
+                    plt.fill_between(shaded_x, 0, combined[mask], color='gray', alpha=0.2,
+                                     label='Major contribution')
+
+            plt.xlabel(r'$\log_{10}\,\tau$')
+            plt.ylabel(r'Contribution $\Phi(0,\tau)\,S(\tau)$')
+            plt.title(f'Contribution vs $\log_{{10}}\tau$ (log A(O)={abundance:.2f})')
+            plt.grid(True, linestyle=':', alpha=0.6)
+            plt.legend(title='Line Center')
+            fname = f'contrib_vs_logtau_{abundance:.2f}.png'
+            plt.savefig(fname, dpi=300)
+            print(f"Saved contribution function plot to {fname}")
+            plt.show()
 
         print("Broadening complete.\n")
 
@@ -673,15 +722,11 @@ def main():
 
     avg_nlte_abundance_fit = np.mean(best_fit_abundances_nlte)
     print(f"\nAverage best-fit NLTE abundance (before correction): {avg_nlte_abundance_fit:.3f}")
-    nlte_correction = -0.24
     final_nlte_abundance = avg_nlte_abundance_fit
     print(f"Final NLTE Oxygen Abundance: log A(O) = {final_nlte_abundance:.3f}")
 
     avg_lte_abundance_fit = np.mean(best_fit_abundances_lte)
     print(f"\nAverage best-fit LTE abundance: {avg_lte_abundance_fit:.3f}")
-    corrected_lte_abundance = avg_lte_abundance_fit + nlte_correction
-    print(f"LTE abundance + paper's NLTE correction ({nlte_correction:.2f} dex) = {corrected_lte_abundance:.3f}")
-    print(f"(This should be close to your direct NLTE result of {final_nlte_abundance:.3f})")
 
     plt.title('Equivalent Width vs. Oxygen Abundance')
     plt.xlabel('Log Oxygen Abundance [log A(O)]')
