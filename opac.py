@@ -4,7 +4,6 @@ import numpy as np
 from astropy.io import fits
 import matplotlib.pyplot as plt
 import saha_eos as eos
-from scipy.interpolate import RectBivariateSpline
 from scipy.special import voigt_profile
 plt.ion()
 
@@ -55,33 +54,6 @@ ion_indices = {}
 for name in line_elts:
     neutral_indices[name] = np.where((weak_lines['element_name'] == name) & (weak_lines['ion_state']==1))[0]
     ion_indices[name] = np.where((weak_lines['element_name'] == name) & (weak_lines['ion_state']==2))[0]
-
-# Read in the equation of state and make the relevant 2D interpolation functions
-f_eos = fits.open('saha_eos.fits')
-h = f_eos[0].header
-Ts = h['CRVAL1'] + np.arange(h['NAXIS1'])*h['CDELT1']
-Ps_log10 = h['CRVAL2'] + np.arange(h['NAXIS2'])*h['CDELT2']
-rho = f_eos['rho [g/cm**3]'].data
-ns = f_eos['ns [cm^-3]'].data
-ne_table = f_eos['n_e [cm^-3]'].data
-
-# Here we can hack Neutral abundances.
-#Fe = np.where(elt_names == 'Fe')[0]
-#ns[:,:,3*Fe ] *= 0.001   #Neutral
-#ns[:,:,3*Fe+1] *= 0.001 #Ionized
-
-
-# Create 2D interpolation functions for each element/ion species in ns
-# ns has shape (len(Ps_log10), len(Ts), number_of_elements)
-number_of_elements = ns.shape[2]
-log10ns = []
-for i in range(number_of_elements):
-    # Create 2D interpolation function for particle i
-    # RectBivariateSpline expects (x, y, z) where z[i,j] = f(x[i], y[j])
-    interp_func = RectBivariateSpline(Ps_log10, Ts, np.log10(ns[:,:,i]))
-    log10ns.append(interp_func)
-log10ne = RectBivariateSpline(Ps_log10, Ts, np.log10(ne_table))
-
 
 def weak_line_kappa(nu0, dlnu, N_nu, T, ns_vector, microturb=1.0):
     """ For all atomic and ion species, compute the weak line opacities.
@@ -337,44 +309,75 @@ def kappa_cont_H(nu, T, nHI, nHII, nHm, ne):
             nHm * Hmbf(nu, T) + nHI * ne * Hmff(nu, T)
     return kappa
 
-if __name__=="__main__":
-    #Lets compute a Rosseland mean opacity!
-    #Create a grid of frequencies from 30 nm to 30 microns.
-    dnu = 1e13
-    plt.clf()
-    nu = dnu*np.arange(1000) + dnu/2
-    natoms = f_eos['ns [cm^-3]'].data.shape[2]//3
-    kappa_bar_Planck = np.zeros_like(f_eos[0].data)
-    kappa_bar_Ross = np.zeros_like(f_eos[0].data)
-    for i, P_log10 in enumerate(Ps_log10):
-        for j, T in enumerate(Ts):
-            nHI = f_eos['ns [cm^-3]'].data[i,j,0]
-            nHII = f_eos['ns [cm^-3]'].data[i,j,1]
-            nHm = f_eos['ns [cm^-3]'].data[i,j,2]
-            ne = f_eos['n_e [cm^-3]'].data[i,j]
-            #Compute the volume-weighted absorption coefficient, using Hydrogen
-            kappa = kappa_cont_H(nu, T, nHI, nHII, nHm, ne)
-            #Now compute the Rosseland and Planck means.
-            Bnu = nu**3/(np.exp(h_kB_cgs*nu/T)-1)
-            dBnu = nu**4 * np.exp(h_kB_cgs*nu/T)/(np.exp(h_kB_cgs*nu/T)-1)**2
-            kappa_bar_Planck[i,j] = np.sum(kappa*Bnu)/np.sum(Bnu)/rho[i,j]
-            kappa_bar_Ross[i,j] = 1/(np.sum(dBnu/kappa)/np.sum(dBnu))/rho[i,j]
-            if (i==30): #This is log_10(P)=3.5 - similar to solar photosphere.
-                if ((j < 18) & (j % 2 == 0)):
-                    plt.loglog(3e8/nu, kappa/rho[i,j], label=f'T={T}K')
-    hdu1 = fits.PrimaryHDU(kappa_bar_Ross)
-    hdu1.header['CRVAL1'] = Ts[0]
-    hdu1.header['CDELT1'] = Ts[1]-Ts[0]
-    hdu1.header['CTYPE1'] = 'Temperature [K]'
-    hdu1.header['CRVAL2'] = Ps_log10[0]
-    hdu1.header['CDELT2'] = Ps_log10[1]-Ps_log10[0]
-    hdu1.header['CTYPE2'] = 'log10(pressure) [dyne/cm^2]'
-    hdu1.header['EXTNAME'] = 'kappa_Ross [cm**2/g]'
-    hdu2 = fits.ImageHDU(kappa_bar_Planck)
-    hdu2.header['EXTNAME'] = 'kappa_Planck [cm**2/g]'
-    hdulist = fits.HDUList([hdu1, hdu2])
-    hdulist.writeto('Ross_Planck_opac.fits', overwrite=True)
-    plt.legend()
-    plt.xlabel('Wavelength [m]')
-    plt.ylabel(r'$\kappa_R$ [cm$^2$/g]')
-    plt.show()
+
+def generate_opacity_tables(eos_filename='saha_eos.fits',
+                            outfile='Ross_Planck_opac.fits',
+                            show_plot=True,
+                            A_O_log=None):
+    """Create Rosseland/Planck mean opacity tables matching a given EOS file."""
+
+    if A_O_log is not None:
+        print(f"Building opacity tables for log A(O) = {A_O_log:.2f}")
+
+    f_eos = fits.open(eos_filename)
+    try:
+        h = f_eos[0].header
+        Ts = h['CRVAL1'] + np.arange(h['NAXIS1'])*h['CDELT1']
+        Ps_log10 = h['CRVAL2'] + np.arange(h['NAXIS2'])*h['CDELT2']
+        rho = f_eos['rho [g/cm**3]'].data
+        ns = f_eos['ns [cm^-3]'].data
+        ne_table = f_eos['n_e [cm^-3]'].data
+
+        # Frequency grid: 30 nm to 30 microns
+        dnu = 1e13
+        nu = dnu * np.arange(1000) + dnu/2
+
+        kappa_bar_Planck = np.zeros_like(rho)
+        kappa_bar_Ross = np.zeros_like(rho)
+
+        if show_plot:
+            plt.clf()
+
+        for i, _ in enumerate(Ps_log10):
+            for j, T in enumerate(Ts):
+                nHI = ns[i, j, 0]
+                nHII = ns[i, j, 1]
+                nHm = ns[i, j, 2]
+                ne = ne_table[i, j]
+
+                kappa = kappa_cont_H(nu, T, nHI, nHII, nHm, ne)
+                Bnu = nu**3 / (np.exp(h_kB_cgs * nu / T) - 1)
+                dBnu = nu**4 * np.exp(h_kB_cgs * nu / T) / (np.exp(h_kB_cgs * nu / T) - 1)**2
+
+                kappa_bar_Planck[i, j] = np.sum(kappa * Bnu) / np.sum(Bnu) / rho[i, j]
+                kappa_bar_Ross[i, j] = 1.0 / (np.sum(dBnu / kappa) / np.sum(dBnu)) / rho[i, j]
+
+                if show_plot and i == 30 and (j < 18) and (j % 2 == 0):
+                    plt.loglog(3e8/nu, kappa/rho[i, j], label=f'T={T}K')
+
+        hdu1 = fits.PrimaryHDU(kappa_bar_Ross)
+        hdu1.header['CRVAL1'] = Ts[0]
+        hdu1.header['CDELT1'] = Ts[1] - Ts[0]
+        hdu1.header['CTYPE1'] = 'Temperature [K]'
+        hdu1.header['CRVAL2'] = Ps_log10[0]
+        hdu1.header['CDELT2'] = Ps_log10[1] - Ps_log10[0]
+        hdu1.header['CTYPE2'] = 'log10(pressure) [dyne/cm^2]'
+        hdu1.header['EXTNAME'] = 'kappa_Ross [cm**2/g]'
+
+        hdu2 = fits.ImageHDU(kappa_bar_Planck)
+        hdu2.header['EXTNAME'] = 'kappa_Planck [cm**2/g]'
+
+        hdulist = fits.HDUList([hdu1, hdu2])
+        hdulist.writeto(outfile, overwrite=True)
+
+        if show_plot:
+            plt.legend()
+            plt.xlabel('Wavelength [m]')
+            plt.ylabel(r'$\\kappa_R$ [cm$^2$/g]')
+            plt.show()
+    finally:
+        f_eos.close()
+
+
+if __name__ == "__main__":
+    generate_opacity_tables(show_plot=True)

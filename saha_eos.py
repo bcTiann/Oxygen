@@ -239,7 +239,7 @@ def saha_solve_P(log_n_e_mol_cm3, P_0_cgs, T, A_O_log):
     return np.log(P_0_cgs/P)
 
 
-def P_T_tables(Ps, Ts, savefile=''):
+def P_T_tables(Ps, Ts, savefile='', A_O_log=8.69):
     """
     For an array of densities and specific entropies, create tables of
     density (TODO: gammas and entropy).
@@ -270,12 +270,12 @@ def P_T_tables(Ps, Ts, savefile=''):
     nT = len(Ts)
     rho_tab = np.empty((nP, nT))
     mu_tab = np.empty((nP, nT))
-    Ui_tab = np.empty((nP,nT))
-    Q_tab = np.empty((nP,nT))
-    cP_tab = np.empty((nP,nT))
-    
-    #Find the number of atoms and ions
-    n_e, ns, mu, Ui, rho  = ns_from_P_T(Ps[0], Ts[0])
+    Ui_tab = np.empty((nP, nT))
+    Q_tab = np.empty((nP, nT))
+    cP_tab = np.empty((nP, nT))
+
+    #Find the number of atoms and ions using the first grid point
+    n_e, ns, mu, Ui, rho = ns_from_P_T(Ps[0], Ts[0], A_O_log=A_O_log)
     n_species = len(ns)
     
     ns_tab = np.empty((nP,nT,n_species))
@@ -288,8 +288,8 @@ def P_T_tables(Ps, Ts, savefile=''):
     for i, P in enumerate(Ps):
         for j, T in enumerate(Ts):
             #Compute number densities and densities, and also a single-sided derivative
-            n_e, ns, mu, Ui, rho  = ns_from_P_T(P, T)
-            _, _, mu_plus, Ui_plus, rho_plus = ns_from_P_T(P, T + dT)
+            n_e, ns, mu, Ui, rho = ns_from_P_T(P, T, A_O_log=A_O_log)
+            _, _, mu_plus, Ui_plus, rho_plus = ns_from_P_T(P, T + dT, A_O_log=A_O_log)
             
             #Fill in the tables not involving derivatives
             rho_tab[i,j] = rho #Already in cgs
