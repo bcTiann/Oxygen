@@ -216,7 +216,7 @@ def run_abundance_case(job):
 
         n_e_val = n_e.cgs.value
         ns_val = ns.cgs.value
-        n_H_val = ns_val[0] + ns_val[1] + ns_val[2]
+        n_H_val = ns_val[0]
 
         n_e_q = n_e_val * u.cm**-3
         n_H_q = n_H_val * u.cm**-3
@@ -600,21 +600,27 @@ def main():
 
         fig, (ax_eps, ax_state) = plt.subplots(2, 1, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         ax_eps.semilogx(tau_grid, epsilon_profile, marker='o', color='tab:blue')
-        ax_eps.set_ylabel('Thermalisation Parameter Epsilon')
+        ax_eps.set_ylabel(r'$\varepsilon$')
         ax_eps.grid(True, linestyle=':', alpha=0.6)
 
-        temp_line, = ax_state.semilogx(tau_grid, Ts, color='tab:red', label='Temperature [K]')
-        ax_state.set_ylabel('Temperature [K]')
+        temp_line, = ax_state.semilogx(tau_grid, Ts, color='tab:red', label=r'$T\,[\mathrm{K}]$')
+        ax_state.set_ylabel(r'$T\ \mathrm{[K]}$')
         ax_state.grid(True, linestyle=':', alpha=0.4)
 
         ax_press = ax_state.twinx()
-        pressure_line, = ax_press.semilogx(tau_grid, Ps, color='tab:green', linestyle='--', label='Pressure [dyn/cm^2]')
-        ax_press.set_ylabel('Pressure [dyn/cm^2]')
+        pressure_line, = ax_press.semilogx(tau_grid, Ps, color='tab:green', linestyle='--', label=r'$P_{\rm gas}\,[\mathrm{dyn\,cm^{-2}}]$')
+        ax_press.set_ylabel(r'$P_{\rm gas}\ \mathrm{[dyn\,cm^{-2}]}$')
         ax_press.set_yscale('log')
 
-        ax_state.set_xlabel('Optical Depth Tau')
+        ax_rho = ax_state.twinx()
+        ax_rho.spines["right"].set_position(("axes", 1.12))
+        rho_line, = ax_rho.semilogx(tau_grid, rhos, color='tab:purple', linestyle='-.', label=r'$\rho\,[\mathrm{g\,cm^{-3}}]$')
+        ax_rho.set_ylabel(r'$\rho\ \mathrm{[g\,cm^{-3}]}$')
+        ax_rho.set_yscale('log')
 
-        lines = [temp_line, pressure_line]
+        ax_state.set_xlabel(r'$\tau$')
+
+        lines = [temp_line, pressure_line, rho_line]
         labels = [line.get_label() for line in lines]
         ax_state.legend(lines, labels, loc='best')
 
