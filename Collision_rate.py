@@ -59,11 +59,6 @@ def derive_C_ul(T,
     return C_ul.decompose().to_value()
 
 
-OI_TRIPLET = [
-    {"E_l": 9.1460911*u.eV, "E_u": 10.7409314*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 3, "A_ul": 3.69e7/u.s},
-    {"E_l": 9.1460911*u.eV, "E_u": 10.7404756*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 2, "A_ul": 3.69e7/u.s},
-    {"E_l": 9.1460911*u.eV, "E_u": 10.7402250*u.eV, "f": 4.68e-1, "J_l": 2, "J_u": 1, "A_ul": 3.69e7/u.s},
-]
 
 
 # ## Observed Wavelength: 7774.17  Å

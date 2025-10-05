@@ -4,7 +4,7 @@ import astropy.units as u
 import astropy.constants as c
 from scipy.integrate import cumulative_trapezoid as cumtrapz
 
-from solutions2 import lambda_matrix, phi_matrix, calc_Bnu  # 老师作业的实现
+from solutions2 import lambda_matrix, phi_matrix, calc_Bnu 
 
 
 def tau_nu_from_ratio(tau_grid, kappa_ratio):
