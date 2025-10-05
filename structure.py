@@ -613,7 +613,7 @@ def main():
         ax_press.set_yscale('log')
 
         ax_rho = ax_state.twinx()
-        ax_rho.spines["right"].set_position(("axes", 1.12))
+        ax_rho.spines["right"].set_position(("axes", 1.18))
         rho_line, = ax_rho.semilogx(tau_grid, rhos, color='tab:purple', linestyle='-.', label=r'$\rho\,[\mathrm{g\,cm^{-3}}]$')
         ax_rho.set_ylabel(r'$\rho\ \mathrm{[g\,cm^{-3}]}$')
         ax_rho.set_yscale('log')
@@ -626,42 +626,15 @@ def main():
             P_tau = float(np.interp(tau_ref, tau_grid, Ps))
             rho_tau = float(np.interp(tau_ref, tau_grid, rhos))
 
-            ax_state.axvline(tau_ref, color='k', linestyle=':', alpha=0.4)
+            ax_state.axvline(tau_ref, color='k', linestyle=':', alpha=0.3)
 
             ax_state.scatter([tau_ref], [T_tau], color='tab:red', zorder=5)
-            ax_state.annotate(
-                rf'$T(\tau=1)={T_tau:.0f}\,\mathrm{{K}}$',
-                xy=(tau_ref, T_tau),
-                xytext=(tau_ref * 1.15, T_tau),
-                textcoords='data',
-                color='tab:red',
-                ha='left',
-                va='center',
-            )
 
             if P_tau > 0:
                 ax_press.scatter([tau_ref], [P_tau], color='tab:green', zorder=5)
-                ax_press.annotate(
-                    rf'$\log_{{10}} P(\tau=1)={np.log10(P_tau):.2f}$',
-                    xy=(tau_ref, P_tau),
-                    xytext=(tau_ref * 1.15, P_tau * 1.3),
-                    textcoords='data',
-                    color='tab:green',
-                    ha='left',
-                    va='bottom',
-                )
 
             if rho_tau > 0:
                 ax_rho.scatter([tau_ref], [rho_tau], color='tab:purple', zorder=5)
-                ax_rho.annotate(
-                    rf'$\log_{{10}} \rho(\tau=1)={np.log10(rho_tau):.2f}$',
-                    xy=(tau_ref, rho_tau),
-                    xytext=(tau_ref * 1.15, rho_tau * 1.5),
-                    textcoords='data',
-                    color='tab:purple',
-                    ha='left',
-                    va='bottom',
-                )
 
         lines = [temp_line, pressure_line, rho_line]
         labels = [line.get_label() for line in lines]
