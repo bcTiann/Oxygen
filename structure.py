@@ -701,11 +701,72 @@ def main():
     print("Saved LTE/NLTE comparison plot to spectrum_all_abundances_LTE_NLTE.png")
     plt.show()
 
-    plt.figure(figsize=(12, 8))
+    all_abundances = [res['abundance'] for res in results_list]
     colors = ['blue', 'green', 'red']
+
+    # --- LTE vs Observed ---
+    plt.figure(figsize=(12, 8))
+    ax_lte = plt.gca()
+    lte_annotation = []
+
+    for i in range(len(line_centers_nm)):
+        abundances = all_abundances
+        model_ews_lte = [res['model_EW_pm_lte'][i] for res in results_list]
+
+        ax_lte.plot(abundances, model_ews_lte, 'o--', label=f'LTE Model {line_centers_nm[i]:.2f} nm', color=colors[i], alpha=0.8)
+        ax_lte.axhline(y=observed_EW[i], linestyle=':', color=colors[i], label=f'Observed {line_centers_nm[i]:.2f} nm')
+
+        fit_ab_lte = np.interp(observed_EW[i], model_ews_lte, abundances)
+        best_fit_abundances_lte.append(fit_ab_lte)
+
+        ax_lte.scatter([fit_ab_lte], [observed_EW[i]], color=colors[i], marker='^', s=55, edgecolor='k', zorder=5, alpha=0.85)
+
+        y_offset = 0.3 * (i - 1)
+        va_lte = 'bottom' if y_offset >= 0 else 'top'
+        ax_lte.text(
+            fit_ab_lte - 0.02,
+            observed_EW[i] + y_offset,
+            f'LTE {fit_ab_lte:.3f}',
+            color=colors[i],
+            fontsize=9,
+            ha='right',
+            va=va_lte
+        )
+
+        lte_annotation.append(f"{line_centers_nm[i]:.2f} nm: LTE {fit_ab_lte:.3f}")
+
+    if lte_annotation:
+        ax_lte.text(
+            0.98,
+            0.02,
+            "\n".join(lte_annotation),
+            transform=ax_lte.transAxes,
+            ha='right',
+            va='bottom',
+            fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='gray')
+        )
+
+    if all_abundances:
+        x_min = min(all_abundances)
+        x_max = 9.5
+        if x_max <= x_min:
+            x_max = max(all_abundances)
+        ax_lte.set_xlim(x_min, x_max)
+
+    ax_lte.set_title('Equivalent Width vs. Oxygen Abundance (LTE vs Observed)')
+    ax_lte.set_xlabel('Log Oxygen Abundance [log A(O)]')
+    ax_lte.set_ylabel('Equivalent Width [pm]')
+    ax_lte.grid(True)
+    ax_lte.legend()
+    plt.savefig('abundance_fit_lte_observed.png', dpi=300)
+    print('Saved LTE vs observed plot to abundance_fit_lte_observed.png')
+    plt.show()
+
+    # --- NLTE vs LTE vs Observed ---
+    plt.figure(figsize=(12, 8))
     ax = plt.gca()
     annotation_lines = []
-    all_abundances = [res['abundance'] for res in results_list]
 
     for i in range(len(line_centers_nm)):
         abundances = all_abundances
@@ -719,27 +780,7 @@ def main():
         fit_ab_nlte = np.interp(observed_EW[i], model_ews_nlte, abundances)
         best_fit_abundances_nlte.append(fit_ab_nlte)
 
-        fit_ab_lte = np.interp(observed_EW[i], model_ews_lte, abundances)
-        best_fit_abundances_lte.append(fit_ab_lte)
-
-        ax.axvline(
-            fit_ab_nlte,
-            color=colors[i],
-            linestyle='-.',
-            linewidth=1.2,
-            alpha=0.6,
-            label='NLTE best-fit abundance' if i == 0 else '_nolegend_'
-        )
-        ax.axvline(
-            fit_ab_lte,
-            color=colors[i],
-            linestyle=':',
-            linewidth=1.2,
-            alpha=0.6,
-            label='LTE best-fit abundance' if i == 0 else '_nolegend_'
-        )
         ax.scatter([fit_ab_nlte], [observed_EW[i]], color=colors[i], marker='o', s=55, edgecolor='k', zorder=5)
-        ax.scatter([fit_ab_lte], [observed_EW[i]], color=colors[i], marker='^', s=55, edgecolor='k', zorder=5, alpha=0.85)
 
         y_offset = 0.3 * (i - 1)
         va_nlte = 'bottom' if y_offset >= 0 else 'top'
@@ -753,20 +794,7 @@ def main():
             va=va_nlte
         )
 
-        y_offset_lte = y_offset - 0.15
-        va_lte = 'bottom' if y_offset_lte >= 0 else 'top'
-        ax.text(
-            fit_ab_lte - 0.02,
-            observed_EW[i] + y_offset_lte,
-            f'LTE {fit_ab_lte:.3f}',
-            color=colors[i],
-            fontsize=9,
-            ha='right',
-            va=va_lte
-        )
-
-        annotation_lines.append(f"{line_centers_nm[i]:.2f} nm: NLTE {fit_ab_nlte:.3f}, LTE {fit_ab_lte:.3f}")
-        print(f"Line {line_centers_nm[i]:.2f} nm -> Best-fit NLTE Abundance: {fit_ab_nlte:.3f}, Best-fit LTE Abundance: {fit_ab_lte:.3f}")
+        annotation_lines.append(f"{line_centers_nm[i]:.2f} nm: NLTE {fit_ab_nlte:.3f}")
 
     if annotation_lines:
         ax.text(
@@ -795,13 +823,13 @@ def main():
     avg_lte_abundance_fit = np.mean(best_fit_abundances_lte)
     print(f"\nAverage best-fit LTE abundance: {avg_lte_abundance_fit:.3f}")
 
-    ax.set_title('Equivalent Width vs. Oxygen Abundance')
+    ax.set_title('Equivalent Width vs. Oxygen Abundance (NLTE & LTE vs Observed)')
     ax.set_xlabel('Log Oxygen Abundance [log A(O)]')
     ax.set_ylabel('Equivalent Width [pm]')
     ax.grid(True)
     ax.legend()
-    plt.savefig('abundance_fit.png', dpi=300)
-    print("Curve of growth plot saved as abundance_fit.png")
+    plt.savefig('abundance_fit_nlte_lte_observed.png', dpi=300)
+    print('Saved NLTE/LTE vs observed plot to abundance_fit_nlte_lte_observed.png')
     plt.show()
     plt.close('all')
 
