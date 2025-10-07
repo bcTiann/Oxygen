@@ -30,10 +30,10 @@ def H_nlte_at_nu(
     tiny = 1e-12
     eps_clip = np.clip(eps, tiny, 1.0)
 
-    kappa_ratio_eff = kappa_ratio / eps_clip
-    tau_nu = tau_nu_from_ratio(tau_grid, kappa_ratio_eff)
+    # kappa_ratio_eff = kappa_ratio / eps_clip
+    # tau_nu = tau_nu_from_ratio(tau_grid, kappa_ratio_eff)
     
-    # tau_nu = tau_nu_from_ratio(tau_grid, kappa_ratio)
+    tau_nu = tau_nu_from_ratio(tau_grid, kappa_ratio)
 
     Λ = lambda_matrix(tau_nu)
     Φ = phi_matrix(tau_nu)

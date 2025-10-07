@@ -38,7 +38,7 @@ OI_TRIPLET = [
 
 
 DEFAULT_ABUNDANCES = np.array([8.59, 9.50, 10.00])
-# trial_abundances = np.array([8.59, 8.69])
+
 # ---- Tunable configuration ----
 BROADENING = {
     "macro": 2.0,   # km/s  # Macroturbulence velocity
@@ -172,6 +172,25 @@ def ensure_opacity_tables(abundance, tables_dir, regenerate=False, show_plot=Fal
     return opacity_path
 
 
+def Blambda_SI(wave_um, T):
+    """
+    Planck function in cgs units.
+    """
+    return planck_C1/wave_um**5/(np.exp(planck_C2/wave_um/T)-1)
+
+def compute_H(wave, Ts, tau_grid, kappa_nu_bars, kappa_bars):
+    Hlambda = np.zeros(len(wave))  # Initialize H array
+    # Compute the flux for each wavelength
+    for i, w in enumerate(wave):
+        # Now we need S(tau_nu), i.e. B(tau_nu(tau))
+        tau_nu  = cumulative_trapezoid(kappa_nu_bars[i]/kappa_bars, x=tau_grid, initial=0)
+        wave_um = w.to(u.um).value
+        Slambda = Blambda_SI(wave_um, Ts)
+        Hlambda[i] = 0.5*(Slambda[0]*expn(3,0) + \
+        np.sum((Slambda[1:]-Slambda[:-1])/(tau_nu[1:]-tau_nu[:-1])*\
+             (expn(4,tau_nu[:-1])-expn(4,tau_nu[1:]))))
+    return Hlambda
+
 def load_kappa_bars(opacity_path, Ps, Ts):
     """Load Rosseland mean opacities and interpolate onto the model grid."""
     with pyfits.open(opacity_path) as f_opac:
@@ -207,6 +226,7 @@ def run_abundance_case(job):
 
     epsilon_profile = np.zeros(len(tau_grid))
     kappa_nu_bars = np.empty((Nnu, len(tau_grid)))
+    rho_profile = np.zeros(len(tau_grid))
 
     for i, (T, P, _) in enumerate(zip(Ts, Ps, rhos)):
         P_with_units = P * u.dyne / u.cm**2
@@ -242,6 +262,7 @@ def run_abundance_case(job):
 
         epsilon_profile[i] = weighted_eps_sum / f_sum
 
+        rho_profile[i] = rho_check
         rho_val = rho_check
 
         kappa_continuum = opac.kappa_cont(nu, T, nHI=ns_val[0], nHII=ns_val[1], nHm=ns_val[2], ne=n_e_val)
@@ -352,6 +373,7 @@ def run_abundance_case(job):
         'line_indices_list': line_indices_list,
         'S_profiles': np.array(S_profiles),
         'contrib_profiles': np.array(contrib_profiles),
+        'rho_profile': rho_profile,
     }
 
     return result
@@ -529,6 +551,8 @@ def main():
     results_list = []
     log_tau = np.log10(tau_grid)
 
+    rho_records = []
+
     for res in results:
         abundance = res['abundance']
         epsilon_profile = res['epsilon_profile']
@@ -540,6 +564,10 @@ def main():
         model_EW_results_nlte = res['model_EW_pm_nlte']
         model_EW_results_lte = res['model_EW_pm_lte']
         S_profiles = res['S_profiles']
+        rho_profile = res.get('rho_profile')
+
+        if rho_profile is not None:
+            rho_records.append((abundance, rho_profile))
 
         print(f"{'='*60}")
         print(f"--- Results for log A(O) = {abundance:.2f} ---")
@@ -614,13 +642,21 @@ def main():
 
         ax_rho = ax_state.twinx()
         ax_rho.spines["right"].set_position(("axes", 1.18))
-        rho_line, = ax_rho.semilogx(tau_grid, rhos, color='tab:purple', linestyle='-.', label=r'$\rho\,[\mathrm{g\,cm^{-3}}]$')
+        rho_line = None
+        if rho_records:
+            for abundance_rho, rho_prof in rho_records:
+                ax_rho.semilogx(tau_grid, rho_prof, color='tab:purple', linestyle='-.', alpha=0.3)
+            # use last one for legend
+            rho_line, = ax_rho.semilogx(tau_grid, rho_records[-1][1], color='tab:purple', linestyle='-.', alpha=0.8, label=r'$\rho_{\rm Saha}\,[\mathrm{g\,cm^{-3}}]$')
+        else:
+            rho_line, = ax_rho.semilogx(tau_grid, rhos, color='tab:purple', linestyle='-.', label=r'$\rho\,[\mathrm{g\,cm^{-3}}]$')
         ax_rho.set_ylabel(r'$\rho\ \mathrm{[g\,cm^{-3}]}$')
         ax_rho.set_yscale('log')
 
         ax_state.set_xlabel(r'$\tau$')
 
         tau_ref = 1.0
+
         if tau_grid.min() <= tau_ref <= tau_grid.max():
             T_tau = float(np.interp(tau_ref, tau_grid, Ts))
             P_tau = float(np.interp(tau_ref, tau_grid, Ps))
@@ -636,7 +672,9 @@ def main():
             if rho_tau > 0:
                 ax_rho.scatter([tau_ref], [rho_tau], color='tab:purple', zorder=5)
 
-        lines = [temp_line, pressure_line, rho_line]
+        lines = [temp_line, pressure_line]
+        if rho_line is not None:
+            lines.append(rho_line)
         labels = [line.get_label() for line in lines]
         ax_state.legend(lines, labels, loc='best')
 
